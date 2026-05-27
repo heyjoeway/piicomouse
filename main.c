@@ -170,7 +170,7 @@ static const char *buttons_to_string(uint16_t buttons) {
     if (buttons & 0x0100) append_button(text, sizeof(text), &first, "Left");
     if (buttons & 0x0010) append_button(text, sizeof(text), &first, "-");
     if (buttons & 0x1000) append_button(text, sizeof(text), &first, "+");
-    if (buttons & 0x8000) append_button(text, sizeof(text), &first, "Home");
+    if (buttons & 0x0080) append_button(text, sizeof(text), &first, "Home");
     if (buttons & 0x0008) append_button(text, sizeof(text), &first, "A");
     if (buttons & 0x0004) append_button(text, sizeof(text), &first, "B");
     if (buttons & 0x0001) append_button(text, sizeof(text), &first, "2");
@@ -365,7 +365,7 @@ static void parse_wiimote_ir_extended(const uint8_t *ir_data, uint16_t ir_len) {
 
 static void handle_ir_profile_hotkeys(uint16_t buttons) {
     uint16_t changed = buttons ^ previous_buttons;
-    bool home_down = (buttons & 0x8000u) != 0;
+    bool home_down = (buttons & 0x0080u) != 0;
 
     if (!home_down) {
         previous_buttons = buttons;
