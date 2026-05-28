@@ -9,6 +9,7 @@
 #include "wiimote.h"
 
 #define INQUIRY_SECONDS 5
+#define CONNECT_RETRY_MS 1500
 #define BUTTON_PRINT_PERIOD_MS 200
 #define MAX_ATTRIBUTE_VALUE_SIZE 300
 #define WIIMOTE_IR_POINTS 4
@@ -59,6 +60,7 @@ static const char *wii_name_prefix = "Nintendo RVL-CNT-01";
 static btstack_packet_callback_registration_t hci_event_callback_registration;
 static btstack_timer_source_t button_print_timer;
 static btstack_timer_source_t ir_init_timer;
+static btstack_timer_source_t connect_retry_timer;
 
 static uint8_t hid_descriptor_storage[MAX_ATTRIBUTE_VALUE_SIZE];
 
@@ -158,12 +160,33 @@ static const char *error_code_to_string(uint8_t status) {
     }
 }
 
+static void start_scan(void);
+
+static void connect_retry_timer_handler(btstack_timer_source_t *ts) {
+    (void)ts;
+    if (!hid_connected) {
+        start_scan();
+    }
+}
+
 static void start_scan(void) {
     if (pending_connect || hid_connected) {
         return;
     }
-    printf("Starting inquiry. Put Wii Remote into discoverable mode (press 1+2).\n");
-    gap_inquiry_start(INQUIRY_SECONDS);
+    if (wiimote_state.target_addr_configured) {
+        printf("Connecting directly to %s\n", bd_addr_to_str(wiimote_state.target_addr));
+        uint8_t status = hid_host_connect(wiimote_state.target_addr, hid_host_report_mode, &hid_host_cid);
+        if (status == ERROR_CODE_SUCCESS) {
+            pending_connect = true;
+        } else {
+            printf("Connect attempt failed (0x%02x), retry in %dms\n", status, CONNECT_RETRY_MS);
+            btstack_run_loop_set_timer(&connect_retry_timer, CONNECT_RETRY_MS);
+            btstack_run_loop_add_timer(&connect_retry_timer);
+        }
+    } else {
+        printf("No target address. Put Wii Remote into discoverable mode (press 1+2).\n");
+        gap_inquiry_start(INQUIRY_SECONDS);
+    }
 }
 
 static bool is_wii_name(const char *name) {
@@ -802,14 +825,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         }
 
         case GAP_EVENT_INQUIRY_COMPLETE:
-            if (pending_connect) {
-                pending_connect = false;
-                uint8_t status = hid_host_connect(wiimote_state.target_addr, hid_host_report_mode, &hid_host_cid);
-                if (status != ERROR_CODE_SUCCESS) {
-                    printf("HID connect failed (0x%02x), retrying inquiry\n", status);
-                    start_scan();
-                }
-            } else if (!hid_connected) {
+            if (!hid_connected) {
                 start_scan();
             }
             break;
@@ -845,7 +861,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                         }
                         hid_connected = false;
                         hid_host_cid = 0;
-                        start_scan();
+                        pending_connect = false;
+                        btstack_run_loop_set_timer(&connect_retry_timer, CONNECT_RETRY_MS);
+                        btstack_run_loop_add_timer(&connect_retry_timer);
                         break;
                     }
 
@@ -920,6 +938,7 @@ static void hid_host_setup(void) {
     hci_add_event_handler(&hci_event_callback_registration);
 
     btstack_run_loop_set_timer_handler(&ir_init_timer, wiimote_ir_init_timer_handler);
+    btstack_run_loop_set_timer_handler(&connect_retry_timer, connect_retry_timer_handler);
 }
 
 void wiimote_init(void) {
