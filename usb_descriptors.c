@@ -20,7 +20,7 @@
 #endif
 
 #define TUD_RPI_RESET_DESC_LEN 9
-#define USBD_DESC_LEN (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_RPI_RESET_DESC_LEN + TUD_HID_DESC_LEN)
+#define USBD_DESC_LEN (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_RPI_RESET_DESC_LEN + 2*TUD_HID_DESC_LEN)
 
 #if !PICO_STDIO_USB_DEVICE_SELF_POWERED
 #define USBD_CONFIGURATION_DESCRIPTOR_ATTRIBUTE 0
@@ -32,13 +32,15 @@
 
 #define USBD_ITF_CDC 0
 #define USBD_ITF_RPI_RESET 2
-#define USBD_ITF_HID 3
-#define USBD_ITF_MAX 4
+#define USBD_ITF_HID_POINTER 3
+#define USBD_ITF_HID_DIGITIZER 4
+#define USBD_ITF_MAX 5
 
 #define USBD_CDC_EP_CMD 0x81
 #define USBD_CDC_EP_OUT 0x02
 #define USBD_CDC_EP_IN 0x82
-#define USBD_HID_EP_IN 0x83
+#define USBD_HID_POINTER_EP_IN 0x83
+#define USBD_HID_DIGITIZER_EP_IN 0x84
 
 #define USBD_CDC_CMD_MAX_SIZE 8
 #define USBD_CDC_IN_OUT_MAX_SIZE 64
@@ -51,7 +53,8 @@
 #define USBD_STR_SERIAL 0x03
 #define USBD_STR_CDC 0x04
 #define USBD_STR_RPI_RESET 0x05
-#define USBD_STR_HID 0x06
+#define USBD_STR_HID_POINTER 0x06
+#define USBD_STR_HID_DIGITIZER 0x07
 
 #define TUD_RPI_RESET_DESCRIPTOR(_itfnum, _stridx) \
     9, TUSB_DESC_INTERFACE, _itfnum, 0, 0, TUSB_CLASS_VENDOR_SPECIFIC, RESET_INTERFACE_SUBCLASS, RESET_INTERFACE_PROTOCOL, _stridx
@@ -77,8 +80,60 @@ static const tusb_desc_device_t usbd_desc_device = {
     .bNumConfigurations = 1,
 };
 
-static const uint8_t hid_report_desc[] = {
-    TUD_HID_REPORT_DESC_MOUSE(HID_REPORT_ID(1)),
+static const uint8_t hid_report_desc_pointer[] = {
+    0x05, 0x01,
+    0x09, 0x02,
+    0xA1, 0x01,
+      0x85, 0x01,
+      0x05, 0x01,
+      0x09, 0x01,
+      0xA1, 0x00,
+        0x05, 0x09,
+        0x19, 0x01,
+        0x29, 0x03,
+        0x15, 0x00,
+        0x25, 0x01,
+        0x95, 0x03,
+        0x75, 0x01,
+        0x81, 0x02,
+        0x95, 0x05,
+        0x81, 0x01,
+        0x05, 0x01,
+        0x09, 0x30,
+        0x09, 0x31,
+        0x15, 0x00,
+        0x27, 0xFF, 0xFF, 0x00, 0x00,
+        0x95, 0x02,
+        0x75, 0x10,
+        0x81, 0x02,
+      0xC0,
+    0xC0
+};
+
+static const uint8_t hid_report_desc_digitizer[] = {
+    0x05, 0x0D,
+    0x09, 0x02,
+    0xA1, 0x01,
+      0x85, 0x02,
+      0x05, 0x0D,
+      0x09, 0x42,
+      0x09, 0x44,
+      0x15, 0x00,
+      0x25, 0x01,
+      0x75, 0x01,
+      0x95, 0x02,
+      0x81, 0x02,
+      0x95, 0x06,
+      0x81, 0x01,
+      0x05, 0x0D,
+      0x09, 0x30,
+      0x09, 0x31,
+      0x15, 0x00,
+      0x27, 0xFF, 0xFF, 0x00, 0x00,
+      0x95, 0x02,
+      0x75, 0x10,
+      0x81, 0x02,
+    0xC0
 };
 
 static const uint8_t usbd_desc_cfg[USBD_DESC_LEN] = {
@@ -102,11 +157,20 @@ static const uint8_t usbd_desc_cfg[USBD_DESC_LEN] = {
     TUD_RPI_RESET_DESCRIPTOR(USBD_ITF_RPI_RESET, USBD_STR_RPI_RESET),
 
     TUD_HID_DESCRIPTOR(
-        USBD_ITF_HID,
-        USBD_STR_HID,
+        USBD_ITF_HID_POINTER,
+        USBD_STR_HID_POINTER,
         HID_ITF_PROTOCOL_NONE,
-        sizeof(hid_report_desc),
-        USBD_HID_EP_IN,
+        sizeof(hid_report_desc_pointer),
+        USBD_HID_POINTER_EP_IN,
+        USBD_HID_EP_SIZE,
+        USBD_HID_POLL_MS),
+
+    TUD_HID_DESCRIPTOR(
+        USBD_ITF_HID_DIGITIZER,
+        USBD_STR_HID_DIGITIZER,
+        HID_ITF_PROTOCOL_NONE,
+        sizeof(hid_report_desc_digitizer),
+        USBD_HID_DIGITIZER_EP_IN,
         USBD_HID_EP_SIZE,
         USBD_HID_POLL_MS),
 };
@@ -119,7 +183,8 @@ static const char *const usbd_desc_str[] = {
     [USBD_STR_SERIAL] = usbd_serial_str,
     [USBD_STR_CDC] = "Board CDC",
     [USBD_STR_RPI_RESET] = "Reset",
-    [USBD_STR_HID] = "HID",
+    [USBD_STR_HID_POINTER] = "HID Pointer",
+    [USBD_STR_HID_DIGITIZER] = "HID Digitizer",
 };
 
 const uint8_t *tud_descriptor_device_cb(void) {
@@ -162,8 +227,12 @@ const uint16_t *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
 }
 
 const uint8_t *tud_hid_descriptor_report_cb(uint8_t instance) {
-    (void)instance;
-    return hid_report_desc;
+    if (instance == 0) {
+        return hid_report_desc_pointer;
+    } else if (instance == 1) {
+        return hid_report_desc_digitizer;
+    }
+    return NULL;
 }
 
 uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type,

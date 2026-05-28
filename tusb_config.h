@@ -28,7 +28,7 @@
 #endif
 
 #ifndef CFG_TUD_HID
-#define CFG_TUD_HID 1
+#define CFG_TUD_HID 2
 #endif
 
 #ifndef CFG_TUD_CDC_RX_BUFSIZE

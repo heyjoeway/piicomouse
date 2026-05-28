@@ -65,6 +65,14 @@ static bool hid_connected;
 static bool pending_connect;
 static wiimote_tracking_state_t wiimote_state;
 
+typedef enum {
+    HID_MODE_POINTER = 0,
+    HID_MODE_DIGITIZER = 1,
+} hid_output_mode_t;
+
+static hid_output_mode_t hid_output_mode = HID_MODE_POINTER;
+static btstack_timer_source_t hid_report_timer;
+
 enum {
     WIIMOTE_IR_INIT_ENABLE_1 = 0,
     WIIMOTE_IR_INIT_ENABLE_2,
@@ -501,6 +509,95 @@ static void handle_ir_profile_hotkeys(wiimote_tracking_state_t *state, uint16_t 
     state->previous_buttons = buttons;
 }
 
+static void send_hid_pointer_report(const wiimote_tracking_state_t *state) {
+    if (!hid_connected) {
+        return;
+    }
+
+    uint8_t report[6];
+    report[0] = 1;
+    
+    uint8_t buttons = 0;
+    if (state->buttons & 0x0008) buttons |= 0x01;
+    if (state->buttons & 0x0010) buttons |= 0x02;
+    report[1] = buttons;
+
+    uint16_t x = state->have_norm ? state->norm_x : 500;
+    uint16_t y = state->have_norm ? state->norm_y : 500;
+    report[2] = (uint8_t)(x & 0xFF);
+    report[3] = (uint8_t)((x >> 8) & 0xFF);
+    report[4] = (uint8_t)(y & 0xFF);
+    report[5] = (uint8_t)((y >> 8) & 0xFF);
+
+}
+
+static void send_hid_digitizer_report(const wiimote_tracking_state_t *state) {
+    if (!hid_connected) {
+        return;
+    }
+
+    uint8_t report[6];
+    report[0] = 2;
+
+    uint8_t switches = 0;
+    if (state->buttons & 0x0008) switches |= 0x01;
+    if (state->buttons & 0x0010) switches |= 0x02;
+    report[1] = switches;
+
+    uint16_t x = state->have_norm ? state->norm_x : 500;
+    uint16_t y = state->have_norm ? state->norm_y : 500;
+    report[2] = (uint8_t)(x & 0xFF);
+    report[3] = (uint8_t)((x >> 8) & 0xFF);
+    report[4] = (uint8_t)(y & 0xFF);
+    report[5] = (uint8_t)((y >> 8) & 0xFF);
+
+}
+
+static void hid_report_timer_handler_state(const wiimote_tracking_state_t *state, btstack_timer_source_t *ts) {
+    (void)ts;
+
+    if (!hid_connected) {
+        return;
+    }
+
+    if (hid_output_mode == HID_MODE_POINTER) {
+        send_hid_pointer_report(state);
+    } else if (hid_output_mode == HID_MODE_DIGITIZER) {
+        send_hid_digitizer_report(state);
+    }
+
+    btstack_run_loop_set_timer(&hid_report_timer, 10);
+    btstack_run_loop_add_timer(&hid_report_timer);
+}
+
+static void hid_report_timer_handler(btstack_timer_source_t *ts) {
+    hid_report_timer_handler_state(&wiimote_state, ts);
+}
+
+static void handle_hid_mode_hotkeys(wiimote_tracking_state_t *state, uint16_t buttons) {
+    uint16_t changed = buttons ^ state->previous_buttons;
+    bool home_down = (buttons & 0x0080u) != 0;
+
+    if (!home_down) {
+        state->previous_buttons = buttons;
+        return;
+    }
+
+    if ((changed & 0x0002u) && (buttons & 0x0002u)) {
+        if (hid_output_mode != HID_MODE_POINTER) {
+            hid_output_mode = HID_MODE_POINTER;
+            printf("Switched to HID Pointer mode\n");
+        }
+    } else if ((changed & 0x0001u) && (buttons & 0x0001u)) {
+        if (hid_output_mode != HID_MODE_DIGITIZER) {
+            hid_output_mode = HID_MODE_DIGITIZER;
+            printf("Switched to HID Digitizer mode\n");
+        }
+    }
+
+    state->previous_buttons = buttons;
+}
+
 static void parse_wiimote_report(wiimote_tracking_state_t *state, const uint8_t *report, uint16_t report_len) {
     if (report_len < 4) {
         return;
@@ -532,6 +629,7 @@ static void parse_wiimote_report(wiimote_tracking_state_t *state, const uint8_t 
     state->buttons = ((uint16_t)report[2] << 8) | report[3];
     state->have_buttons = true;
     handle_ir_profile_hotkeys(state, state->buttons);
+    handle_hid_mode_hotkeys(state, state->buttons);
 
     if (report_id == 0x33 && report_len >= 19) {
         if (state->ir_debug_frames_remaining > 0) {
@@ -784,4 +882,8 @@ void wiimote_init(void) {
     btstack_run_loop_set_timer_handler(&button_print_timer, button_print_timer_handler);
     btstack_run_loop_set_timer(&button_print_timer, BUTTON_PRINT_PERIOD_MS);
     btstack_run_loop_add_timer(&button_print_timer);
+
+    btstack_run_loop_set_timer_handler(&hid_report_timer, hid_report_timer_handler);
+    btstack_run_loop_set_timer(&hid_report_timer, 10);
+    btstack_run_loop_add_timer(&hid_report_timer);
 }
