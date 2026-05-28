@@ -43,6 +43,15 @@ static uint16_t ir_points_x[WIIMOTE_IR_POINTS];
 static uint16_t ir_points_y[WIIMOTE_IR_POINTS];
 static uint8_t ir_points_size[WIIMOTE_IR_POINTS];
 static bool ir_points_valid[WIIMOTE_IR_POINTS];
+static int16_t ir_last_half_dx;
+static int16_t ir_last_half_dy;
+static uint16_t ir_last_center_x;
+static uint16_t ir_last_center_y;
+static uint8_t ir_dropout_frames;
+static bool ir_have_spread;
+static uint16_t ir_norm_x;
+static uint16_t ir_norm_y;
+static bool have_ir_norm;
 static uint16_t previous_buttons;
 static bd_addr_t target_addr;
 static bool target_addr_configured;
@@ -321,14 +330,36 @@ static void wiimote_ir_init_timer_handler(btstack_timer_source_t *ts) {
     btstack_run_loop_add_timer(&ir_init_timer);
 }
 
+static void compute_ir_norm(uint16_t cx, uint16_t cy, uint16_t spread_x, uint16_t spread_y) {
+    int32_t usable_x = 1023 - (int32_t)spread_x;
+    if (usable_x > 0) {
+        int32_t nx = ((int32_t)cx - (int32_t)(spread_x / 2u)) * 1000 / usable_x;
+        if (nx < 0) nx = 0;
+        if (nx > 1000) nx = 1000;
+        ir_norm_x = (uint16_t)nx;
+    } else {
+        ir_norm_x = 500u;
+    }
+
+    int32_t usable_y = 767 - (int32_t)spread_y;
+    if (usable_y > 0) {
+        int32_t ny = ((int32_t)cy - (int32_t)(spread_y / 2u)) * 1000 / usable_y;
+        if (ny < 0) ny = 0;
+        if (ny > 1000) ny = 1000;
+        ir_norm_y = (uint16_t)ny;
+    } else {
+        ir_norm_y = 500u;
+    }
+}
+
 static void parse_wiimote_ir_extended(const uint8_t *ir_data, uint16_t ir_len) {
     if (ir_len < 12) {
         return;
     }
 
     int valid_count = 0;
-    uint32_t sum_x = 0;
-    uint32_t sum_y = 0;
+    uint16_t valid_x[WIIMOTE_IR_POINTS];
+    uint16_t valid_y[WIIMOTE_IR_POINTS];
 
     for (int i = 0; i < WIIMOTE_IR_POINTS; i++) {
         const uint8_t x_low = ir_data[i * 3];
@@ -338,7 +369,6 @@ static void parse_wiimote_ir_extended(const uint8_t *ir_data, uint16_t ir_len) {
         const uint16_t x = (uint16_t)x_low | (uint16_t)(((xy_hi >> 4) & 0x03u) << 8);
         const uint16_t y = (uint16_t)y_low | (uint16_t)(((xy_hi >> 6) & 0x03u) << 8);
         const uint8_t size = xy_hi & 0x0Fu;
-
         const bool valid = !((x == 1023u) && (y == 1023u));
 
         ir_points_valid[i] = valid;
@@ -347,19 +377,79 @@ static void parse_wiimote_ir_extended(const uint8_t *ir_data, uint16_t ir_len) {
         ir_points_size[i] = size;
 
         if (valid) {
-            sum_x += x;
-            sum_y += y;
+            valid_x[valid_count] = x;
+            valid_y[valid_count] = y;
             valid_count++;
         }
     }
 
     have_ir_state = true;
-    if (valid_count > 0) {
-        ir_center_x = (uint16_t)(sum_x / (uint32_t)valid_count);
-        ir_center_y = (uint16_t)(sum_y / (uint32_t)valid_count);
+
+    if (valid_count >= 2) {
+        // Sort first two valid points by x so xl <= xr.
+        uint16_t xl = valid_x[0], yl = valid_y[0];
+        uint16_t xr = valid_x[1], yr = valid_y[1];
+        if (xl > xr) {
+            uint16_t t;
+            t = xl; xl = xr; xr = t;
+            t = yl; yl = yr; yr = t;
+        }
+
+        ir_center_x = (uint16_t)((xl + xr) / 2u);
+        ir_center_y = (uint16_t)((yl + yr) / 2u);
         have_ir_center = true;
+
+        // Cache half-spread and center for dropout recovery.
+        ir_last_half_dx = (int16_t)((xr - xl) / 2u);
+        ir_last_half_dy = (int16_t)(((int32_t)yr - (int32_t)yl) / 2);
+        ir_last_center_x = ir_center_x;
+        ir_last_center_y = ir_center_y;
+        ir_dropout_frames = 0;
+        ir_have_spread = true;
+
+        uint16_t spread_x = (uint16_t)(xr - xl);
+        uint16_t spread_y = (yr >= yl) ? (uint16_t)(yr - yl) : (uint16_t)(yl - yr);
+        compute_ir_norm(ir_center_x, ir_center_y, spread_x, spread_y);
+        have_ir_norm = true;
+
+    } else if (valid_count == 1 && ir_have_spread && ir_dropout_frames < 3) {
+        // Brief dropout: reconstruct center from the surviving point + last half-spread.
+        uint16_t sx = valid_x[0];
+        uint16_t sy = valid_y[0];
+        int32_t est_cx, est_cy;
+
+        // Determine which side the surviving point is on by comparing to last center.
+        if (sx <= ir_last_center_x) {
+            // Surviving point is the left one — add half-spread toward center.
+            est_cx = (int32_t)sx + ir_last_half_dx;
+            est_cy = (int32_t)sy + ir_last_half_dy;
+        } else {
+            // Surviving point is the right one — subtract half-spread toward center.
+            est_cx = (int32_t)sx - ir_last_half_dx;
+            est_cy = (int32_t)sy - ir_last_half_dy;
+        }
+
+        if (est_cx < 0) est_cx = 0;
+        if (est_cx > 1023) est_cx = 1023;
+        if (est_cy < 0) est_cy = 0;
+        if (est_cy > 767) est_cy = 767;
+
+        ir_center_x = (uint16_t)est_cx;
+        ir_center_y = (uint16_t)est_cy;
+        have_ir_center = true;
+        ir_dropout_frames++;
+
+        // Normalize using the cached half-spread.
+        uint16_t spread_x = (uint16_t)(2 * ir_last_half_dx);
+        uint16_t spread_y = (ir_last_half_dy >= 0)
+            ? (uint16_t)(2 * ir_last_half_dy)
+            : (uint16_t)(-2 * ir_last_half_dy);
+        compute_ir_norm(ir_center_x, ir_center_y, spread_x, spread_y);
+        have_ir_norm = true;
+
     } else {
         have_ir_center = false;
+        have_ir_norm = false;
     }
 }
 
@@ -456,6 +546,9 @@ static void button_print_timer_handler(btstack_timer_source_t *ts) {
         }
         if (have_ir_center) {
             printf(" center=(%u,%u)", ir_center_x, ir_center_y);
+        }
+        if (have_ir_norm) {
+            printf(" norm=(%u,%u)", ir_norm_x, ir_norm_y);
         }
         printf("\n");
     }
@@ -585,6 +678,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     current_buttons = 0;
                     have_ir_state = false;
                     have_ir_center = false;
+                    have_ir_norm = false;
+                    ir_have_spread = false;
+                    ir_dropout_frames = 0;
                     ir_init_in_progress = false;
                     ir_init_step = WIIMOTE_IR_INIT_ENABLE_1;
                     ir_debug_frames_remaining = 0;
