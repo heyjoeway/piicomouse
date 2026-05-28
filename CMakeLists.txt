@@ -35,7 +35,7 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(piicomouse2 main.c )
+add_executable(piicomouse2 main.c wiimote.c)
 
 pico_set_program_name(piicomouse2 "piicomouse2")
 pico_set_program_version(piicomouse2 "0.1")
