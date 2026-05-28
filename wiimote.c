@@ -15,6 +15,7 @@
 #define WIIMOTE_IR_POINTS 4
 #define POINTER_GAIN_X 3
 #define POINTER_GAIN_Y 1
+#define INACTIVITY_TIMEOUT_MS 300000
 
 typedef struct {
     bool valid;
@@ -61,6 +62,7 @@ static btstack_packet_callback_registration_t hci_event_callback_registration;
 static btstack_timer_source_t button_print_timer;
 static btstack_timer_source_t ir_init_timer;
 static btstack_timer_source_t connect_retry_timer;
+static btstack_timer_source_t inactivity_timer;
 
 static uint8_t hid_descriptor_storage[MAX_ATTRIBUTE_VALUE_SIZE];
 
@@ -671,6 +673,22 @@ static void handle_hid_mode_hotkeys(wiimote_tracking_state_t *state, uint16_t bu
     state->previous_buttons_hid_mode = buttons;
 }
 
+static void reset_inactivity_timer(void) {
+    if (hid_connected) {
+        btstack_run_loop_remove_timer(&inactivity_timer);
+        btstack_run_loop_set_timer(&inactivity_timer, INACTIVITY_TIMEOUT_MS);
+        btstack_run_loop_add_timer(&inactivity_timer);
+    }
+}
+
+static void inactivity_timer_handler(btstack_timer_source_t *ts) {
+    (void)ts;
+    if (hid_connected) {
+        printf("Inactivity timeout: disconnecting Wii Remote\n");
+        hid_host_disconnect(hid_host_cid);
+    }
+}
+
 static void parse_wiimote_report(wiimote_tracking_state_t *state, const uint8_t *report, uint16_t report_len) {
     if (report_len < 4) {
         return;
@@ -698,6 +716,8 @@ static void parse_wiimote_report(wiimote_tracking_state_t *state, const uint8_t 
     if (report_id < 0x30 || report_id > 0x3F) {
         return;
     }
+
+    reset_inactivity_timer();
 
     state->buttons = ((uint16_t)report[2] << 8) | report[3];
     state->have_buttons = true;
@@ -871,6 +891,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     hid_connected = true;
                     wiimote_tracking_state_reset_session(&wiimote_state);
                     reset_pointer_motion_state();
+                    reset_inactivity_timer();
                     printf("Wii Remote connected\n");
                     break;
                 }
@@ -905,6 +926,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     printf("Wii Remote disconnected\n");
                     hid_connected = false;
                     hid_host_cid = 0;
+                    btstack_run_loop_remove_timer(&inactivity_timer);
                     wiimote_tracking_state_reset_session(&wiimote_state);
                     reset_pointer_motion_state();
                     start_scan();
@@ -938,6 +960,7 @@ static void hid_host_setup(void) {
     hci_add_event_handler(&hci_event_callback_registration);
 
     btstack_run_loop_set_timer_handler(&ir_init_timer, wiimote_ir_init_timer_handler);
+    btstack_run_loop_set_timer_handler(&inactivity_timer, inactivity_timer_handler);
     btstack_run_loop_set_timer_handler(&connect_retry_timer, connect_retry_timer_handler);
 }
 
