@@ -12,7 +12,8 @@
 #define BUTTON_PRINT_PERIOD_MS 200
 #define MAX_ATTRIBUTE_VALUE_SIZE 300
 #define WIIMOTE_IR_POINTS 4
-#define POINTER_HID_MAX 32767u
+#define POINTER_GAIN_X 3
+#define POINTER_GAIN_Y 1
 
 typedef struct {
     bool valid;
@@ -69,7 +70,7 @@ static wiimote_tracking_state_t wiimote_state;
 
 bool usb_hid_pointer_ready(void);
 bool usb_hid_digitizer_ready(void);
-bool usb_hid_send_pointer_report(uint8_t buttons, uint16_t x, uint16_t y);
+bool usb_hid_send_pointer_report(uint8_t buttons, int8_t dx, int8_t dy);
 bool usb_hid_send_digitizer_report(uint8_t switches, uint16_t x, uint16_t y);
 
 typedef enum {
@@ -80,8 +81,18 @@ typedef enum {
 static hid_output_mode_t hid_output_mode = HID_MODE_POINTER;
 static btstack_timer_source_t hid_report_timer;
 static bool pointer_had_tracking;
-static uint16_t pointer_last_x;
-static uint16_t pointer_last_y;
+static uint16_t pointer_prev_norm_x;
+static uint16_t pointer_prev_norm_y;
+static bool pointer_motion_locked;
+static bool pointer_prev_norm_valid;
+
+static void reset_pointer_motion_state(void) {
+    pointer_had_tracking = false;
+    pointer_prev_norm_x = 0;
+    pointer_prev_norm_y = 0;
+    pointer_motion_locked = false;
+    pointer_prev_norm_valid = false;
+}
 
 enum {
     WIIMOTE_IR_INIT_ENABLE_1 = 0,
@@ -524,29 +535,59 @@ static void send_hid_pointer_report(const wiimote_tracking_state_t *state) {
         return;
     }
 
-    if (!state->have_norm) {
-        if (pointer_had_tracking) {
-            usb_hid_send_pointer_report(0, pointer_last_x, pointer_last_y);
-            pointer_had_tracking = false;
-        }
-        return;
-    }
-
     uint8_t buttons = 0;
     if (state->buttons & 0x0008) buttons |= 0x01;
     if (state->buttons & 0x0010) buttons |= 0x02;
 
-    uint32_t norm_x = 1000u - (uint32_t)state->norm_x;
-    uint32_t norm_y = (uint32_t)state->norm_y;
+    bool movement_lock_requested = (buttons != 0) && ((state->buttons & 0x0004u) == 0);
+    int8_t dx = 0;
+    int8_t dy = 0;
 
-    uint16_t x = (uint16_t)((norm_x * POINTER_HID_MAX + 500u) / 1000u);
-    uint16_t y = (uint16_t)((norm_y * POINTER_HID_MAX + 500u) / 1000u);
+    if (!state->have_norm) {
+        if (pointer_had_tracking) {
+            usb_hid_send_pointer_report(0, 0, 0);
+            pointer_had_tracking = false;
+            pointer_prev_norm_valid = false;
+        }
+        return;
+    }
 
-    pointer_last_x = x;
-    pointer_last_y = y;
+    if (!pointer_prev_norm_valid) {
+        pointer_prev_norm_x = state->norm_x;
+        pointer_prev_norm_y = state->norm_y;
+        pointer_prev_norm_valid = true;
+        pointer_had_tracking = true;
+        usb_hid_send_pointer_report(buttons, 0, 0);
+        return;
+    }
+
+    int32_t delta_x = (int32_t)state->norm_x - (int32_t)pointer_prev_norm_x;
+    int32_t delta_y = (int32_t)state->norm_y - (int32_t)pointer_prev_norm_y;
+
+    pointer_prev_norm_x = state->norm_x;
+    pointer_prev_norm_y = state->norm_y;
     pointer_had_tracking = true;
 
-    usb_hid_send_pointer_report(buttons, x, y);
+    if (movement_lock_requested && !pointer_motion_locked) {
+        pointer_motion_locked = true;
+    } else if (!movement_lock_requested) {
+        pointer_motion_locked = false;
+    }
+
+    if (pointer_motion_locked) {
+        usb_hid_send_pointer_report(buttons, 0, 0);
+        return;
+    }
+
+    delta_x = -delta_x * POINTER_GAIN_X;
+    delta_y = delta_y * POINTER_GAIN_Y;
+
+    if (delta_x < -127) delta_x = -127;
+    if (delta_x > 127) delta_x = 127;
+    if (delta_y < -127) delta_y = -127;
+    if (delta_y > 127) delta_y = 127;
+
+    usb_hid_send_pointer_report(buttons, (int8_t)delta_x, (int8_t)delta_y);
 }
 
 static void send_hid_digitizer_report(const wiimote_tracking_state_t *state) {
@@ -811,6 +852,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     hid_host_cid = hid_subevent_connection_opened_get_hid_cid(packet);
                     hid_connected = true;
                     wiimote_tracking_state_reset_session(&wiimote_state);
+                    reset_pointer_motion_state();
                     printf("Wii Remote connected\n");
                     break;
                 }
@@ -846,6 +888,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     hid_connected = false;
                     hid_host_cid = 0;
                     wiimote_tracking_state_reset_session(&wiimote_state);
+                    reset_pointer_motion_state();
                     start_scan();
                     break;
 
