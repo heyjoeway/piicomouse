@@ -35,7 +35,7 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(piicomouse2 main.c wiimote.c)
+add_executable(piicomouse2 main.c wiimote.c usb_descriptors.c)
 
 pico_set_program_name(piicomouse2 "piicomouse2")
 pico_set_program_version(piicomouse2 "0.1")
@@ -47,9 +47,25 @@ pico_enable_stdio_usb(piicomouse2 1)
 # Add the standard library to the build
 target_link_libraries(piicomouse2
     pico_stdlib
+    tinyusb_device
+    tinyusb_board
     pico_cyw43_arch_none
     pico_btstack_classic
     pico_btstack_cyw43)
+
+target_compile_definitions(piicomouse2 PRIVATE
+    PICO_STDIO_USB_USE_DEFAULT_DESCRIPTORS=0
+    PICO_STDIO_USB_ENABLE_TINYUSB_INIT=1
+    PICO_STDIO_USB_ENABLE_IRQ_BACKGROUND_TASK=1
+    PICO_STDIO_USB_ENABLE_RESET_VIA_VENDOR_INTERFACE=1
+    PICO_STDIO_USB_ENABLE_RESET_VIA_BAUD_RATE=1
+    PICO_STDIO_USB_RESET_INTERFACE_SUPPORT_RESET_TO_BOOTSEL=1
+    PICO_STDIO_USB_RESET_INTERFACE_SUPPORT_RESET_TO_FLASH_BOOT=1
+    PICO_STDIO_USB_RESET_INTERFACE_SUPPORT_MS_OS_20_DESCRIPTOR=1
+    PICO_STDIO_USB_RESET_MAGIC_BAUD_RATE=1200
+    PICO_STDIO_USB_RESET_BOOTSEL_INTERFACE_DISABLE_MASK=0
+    PICO_STDIO_USB_RESET_RESET_TO_FLASH_DELAY_MS=100
+)
 
 # Add the standard include files to the build
 target_include_directories(piicomouse2 PRIVATE
