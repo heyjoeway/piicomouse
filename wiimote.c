@@ -12,6 +12,7 @@
 #define BUTTON_PRINT_PERIOD_MS 200
 #define MAX_ATTRIBUTE_VALUE_SIZE 300
 #define WIIMOTE_IR_POINTS 4
+#define POINTER_HID_MAX 32767u
 
 typedef struct {
     bool valid;
@@ -46,6 +47,7 @@ typedef struct {
     uint8_t ir_dropout_frames;
     bool ir_have_spread;
     uint16_t previous_buttons;
+    uint16_t previous_buttons_hid_mode;
     bd_addr_t target_addr;
     bool target_addr_configured;
     bool wii_pin_use_reversed;
@@ -65,6 +67,11 @@ static bool hid_connected;
 static bool pending_connect;
 static wiimote_tracking_state_t wiimote_state;
 
+bool usb_hid_pointer_ready(void);
+bool usb_hid_digitizer_ready(void);
+bool usb_hid_send_pointer_report(uint8_t buttons, uint16_t x, uint16_t y);
+bool usb_hid_send_digitizer_report(uint8_t switches, uint16_t x, uint16_t y);
+
 typedef enum {
     HID_MODE_POINTER = 0,
     HID_MODE_DIGITIZER = 1,
@@ -72,6 +79,9 @@ typedef enum {
 
 static hid_output_mode_t hid_output_mode = HID_MODE_POINTER;
 static btstack_timer_source_t hid_report_timer;
+static bool pointer_had_tracking;
+static uint16_t pointer_last_x;
+static uint16_t pointer_last_y;
 
 enum {
     WIIMOTE_IR_INIT_ENABLE_1 = 0,
@@ -510,60 +520,59 @@ static void handle_ir_profile_hotkeys(wiimote_tracking_state_t *state, uint16_t 
 }
 
 static void send_hid_pointer_report(const wiimote_tracking_state_t *state) {
-    if (!hid_connected) {
+    if (!hid_connected || !usb_hid_pointer_ready()) {
         return;
     }
 
-    uint8_t report[6];
-    report[0] = 1;
-    
+    if (!state->have_norm) {
+        if (pointer_had_tracking) {
+            usb_hid_send_pointer_report(0, pointer_last_x, pointer_last_y);
+            pointer_had_tracking = false;
+        }
+        return;
+    }
+
     uint8_t buttons = 0;
     if (state->buttons & 0x0008) buttons |= 0x01;
     if (state->buttons & 0x0010) buttons |= 0x02;
-    report[1] = buttons;
 
-    uint16_t x = state->have_norm ? state->norm_x : 500;
-    uint16_t y = state->have_norm ? state->norm_y : 500;
-    report[2] = (uint8_t)(x & 0xFF);
-    report[3] = (uint8_t)((x >> 8) & 0xFF);
-    report[4] = (uint8_t)(y & 0xFF);
-    report[5] = (uint8_t)((y >> 8) & 0xFF);
+    uint32_t norm_x = 1000u - (uint32_t)state->norm_x;
+    uint32_t norm_y = (uint32_t)state->norm_y;
 
+    uint16_t x = (uint16_t)((norm_x * POINTER_HID_MAX + 500u) / 1000u);
+    uint16_t y = (uint16_t)((norm_y * POINTER_HID_MAX + 500u) / 1000u);
+
+    pointer_last_x = x;
+    pointer_last_y = y;
+    pointer_had_tracking = true;
+
+    usb_hid_send_pointer_report(buttons, x, y);
 }
 
 static void send_hid_digitizer_report(const wiimote_tracking_state_t *state) {
-    if (!hid_connected) {
+    if (!hid_connected || !usb_hid_digitizer_ready()) {
         return;
     }
-
-    uint8_t report[6];
-    report[0] = 2;
 
     uint8_t switches = 0;
     if (state->buttons & 0x0008) switches |= 0x01;
     if (state->buttons & 0x0010) switches |= 0x02;
-    report[1] = switches;
 
     uint16_t x = state->have_norm ? state->norm_x : 500;
     uint16_t y = state->have_norm ? state->norm_y : 500;
-    report[2] = (uint8_t)(x & 0xFF);
-    report[3] = (uint8_t)((x >> 8) & 0xFF);
-    report[4] = (uint8_t)(y & 0xFF);
-    report[5] = (uint8_t)((y >> 8) & 0xFF);
 
+    usb_hid_send_digitizer_report(switches, x, y);
 }
 
 static void hid_report_timer_handler_state(const wiimote_tracking_state_t *state, btstack_timer_source_t *ts) {
     (void)ts;
 
-    if (!hid_connected) {
-        return;
-    }
-
-    if (hid_output_mode == HID_MODE_POINTER) {
-        send_hid_pointer_report(state);
-    } else if (hid_output_mode == HID_MODE_DIGITIZER) {
-        send_hid_digitizer_report(state);
+    if (hid_connected) {
+        if (hid_output_mode == HID_MODE_POINTER) {
+            send_hid_pointer_report(state);
+        } else if (hid_output_mode == HID_MODE_DIGITIZER) {
+            send_hid_digitizer_report(state);
+        }
     }
 
     btstack_run_loop_set_timer(&hid_report_timer, 10);
@@ -575,11 +584,11 @@ static void hid_report_timer_handler(btstack_timer_source_t *ts) {
 }
 
 static void handle_hid_mode_hotkeys(wiimote_tracking_state_t *state, uint16_t buttons) {
-    uint16_t changed = buttons ^ state->previous_buttons;
+    uint16_t changed = buttons ^ state->previous_buttons_hid_mode;
     bool home_down = (buttons & 0x0080u) != 0;
 
     if (!home_down) {
-        state->previous_buttons = buttons;
+        state->previous_buttons_hid_mode = buttons;
         return;
     }
 
@@ -595,7 +604,7 @@ static void handle_hid_mode_hotkeys(wiimote_tracking_state_t *state, uint16_t bu
         }
     }
 
-    state->previous_buttons = buttons;
+    state->previous_buttons_hid_mode = buttons;
 }
 
 static void parse_wiimote_report(wiimote_tracking_state_t *state, const uint8_t *report, uint16_t report_len) {

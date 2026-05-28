@@ -100,10 +100,15 @@ static const uint8_t hid_report_desc_pointer[] = {
         0x81, 0x01,
         0x05, 0x01,
         0x09, 0x30,
-        0x09, 0x31,
         0x15, 0x00,
-        0x27, 0xFF, 0xFF, 0x00, 0x00,
-        0x95, 0x02,
+        0x26, 0xFF, 0x7F,
+                0x95, 0x01,
+                0x75, 0x10,
+                0x81, 0x02,
+                0x09, 0x31,
+                0x15, 0x00,
+        0x26, 0xFF, 0x7F,
+                0x95, 0x01,
         0x75, 0x10,
         0x81, 0x02,
       0xC0,
@@ -129,7 +134,7 @@ static const uint8_t hid_report_desc_digitizer[] = {
       0x09, 0x30,
       0x09, 0x31,
       0x15, 0x00,
-      0x27, 0xFF, 0xFF, 0x00, 0x00,
+    0x26, 0xE8, 0x03,
       0x95, 0x02,
       0x75, 0x10,
       0x81, 0x02,
@@ -252,4 +257,36 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
     (void)report_type;
     (void)buffer;
     (void)bufsize;
+}
+
+bool usb_hid_pointer_ready(void) {
+    return tud_hid_n_ready(0);
+}
+
+bool usb_hid_digitizer_ready(void) {
+    return tud_hid_n_ready(1);
+}
+
+bool usb_hid_send_pointer_report(uint8_t buttons, uint16_t x, uint16_t y) {
+    uint8_t report[5];
+
+    report[0] = buttons;
+    report[1] = (uint8_t)(x & 0xFF);
+    report[2] = (uint8_t)((x >> 8) & 0xFF);
+    report[3] = (uint8_t)(y & 0xFF);
+    report[4] = (uint8_t)((y >> 8) & 0xFF);
+
+    return tud_hid_n_report(0, 1, report, sizeof(report));
+}
+
+bool usb_hid_send_digitizer_report(uint8_t switches, uint16_t x, uint16_t y) {
+    uint8_t report[5];
+
+    report[0] = switches;
+    report[1] = (uint8_t)(x & 0xFF);
+    report[2] = (uint8_t)((x >> 8) & 0xFF);
+    report[3] = (uint8_t)(y & 0xFF);
+    report[4] = (uint8_t)((y >> 8) & 0xFF);
+
+    return tud_hid_n_report(1, 2, report, sizeof(report));
 }
