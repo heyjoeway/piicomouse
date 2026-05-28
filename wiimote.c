@@ -79,6 +79,16 @@ bool usb_hid_send_pointer_report(uint8_t buttons, int8_t dx, int8_t dy);
 bool usb_hid_send_digitizer_report(uint8_t switches, uint16_t x, uint16_t y);
 bool usb_hid_send_keyboard_report(uint8_t modifiers, const uint8_t keycodes[6]);
 
+#define HID_KEY_UP_ARROW 0x52
+#define HID_KEY_DOWN_ARROW 0x51
+#define HID_KEY_LEFT_ARROW 0x50
+#define HID_KEY_RIGHT_ARROW 0x4F
+#define HID_KEY_HOME 0x4A
+#define HID_KEY_ESCAPE 0x29
+#define HID_KEY_MUTE 0x7F
+#define HID_KEY_VOLUME_UP 0x80
+#define HID_KEY_VOLUME_DOWN 0x81
+
 typedef enum {
     HID_MODE_POINTER = 0,
     HID_MODE_DIGITIZER = 1,
@@ -564,7 +574,6 @@ static void send_hid_pointer_report(const wiimote_tracking_state_t *state) {
 
     uint8_t buttons = 0;
     if (state->buttons & 0x0008) buttons |= 0x01;
-    if (state->buttons & 0x0010) buttons |= 0x02;
 
     bool movement_lock_requested = (buttons != 0) && ((state->buttons & 0x0004u) == 0);
     int8_t dx = 0;
@@ -632,10 +641,40 @@ static void send_hid_digitizer_report(const wiimote_tracking_state_t *state) {
     usb_hid_send_digitizer_report(switches, x, y);
 }
 
+static void add_hid_key(uint8_t keycodes[6], uint8_t *count, uint8_t keycode) {
+    if (*count < 6) {
+        keycodes[*count] = keycode;
+        (*count)++;
+    }
+}
+
+static void send_hid_keyboard_report(const wiimote_tracking_state_t *state) {
+    if (!hid_connected || !usb_hid_keyboard_ready()) {
+        return;
+    }
+
+    uint8_t keycodes[6] = {0};
+    uint8_t key_count = 0;
+
+    if (state->buttons & 0x0800u) add_hid_key(keycodes, &key_count, HID_KEY_UP_ARROW);
+    if (state->buttons & 0x0400u) add_hid_key(keycodes, &key_count, HID_KEY_DOWN_ARROW);
+    if (state->buttons & 0x0100u) add_hid_key(keycodes, &key_count, HID_KEY_LEFT_ARROW);
+    if (state->buttons & 0x0200u) add_hid_key(keycodes, &key_count, HID_KEY_RIGHT_ARROW);
+
+    if (state->buttons & 0x0002u) add_hid_key(keycodes, &key_count, HID_KEY_VOLUME_UP);
+    if (state->buttons & 0x0001u) add_hid_key(keycodes, &key_count, HID_KEY_VOLUME_DOWN);
+    if (state->buttons & 0x0080u) add_hid_key(keycodes, &key_count, HID_KEY_HOME);
+    if (state->buttons & 0x1000u) add_hid_key(keycodes, &key_count, HID_KEY_MUTE);
+    if (state->buttons & 0x0010u) add_hid_key(keycodes, &key_count, HID_KEY_ESCAPE);
+
+    usb_hid_send_keyboard_report(0, keycodes);
+}
+
 static void hid_report_timer_handler_state(const wiimote_tracking_state_t *state, btstack_timer_source_t *ts) {
     (void)ts;
 
     if (hid_connected) {
+        send_hid_keyboard_report(state);
         if (hid_output_mode == HID_MODE_POINTER) {
             send_hid_pointer_report(state);
         } else if (hid_output_mode == HID_MODE_DIGITIZER) {
@@ -653,9 +692,9 @@ static void hid_report_timer_handler(btstack_timer_source_t *ts) {
 
 static void handle_hid_mode_hotkeys(wiimote_tracking_state_t *state, uint16_t buttons) {
     uint16_t changed = buttons ^ state->previous_buttons_hid_mode;
-    bool home_down = (buttons & 0x0080u) != 0;
+    bool b_down = (buttons & 0x0004u) != 0;
 
-    if (!home_down) {
+    if (!b_down) {
         state->previous_buttons_hid_mode = buttons;
         return;
     }
