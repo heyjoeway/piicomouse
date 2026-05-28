@@ -74,8 +74,10 @@ static wiimote_tracking_state_t wiimote_state;
 
 bool usb_hid_pointer_ready(void);
 bool usb_hid_digitizer_ready(void);
+bool usb_hid_keyboard_ready(void);
 bool usb_hid_send_pointer_report(uint8_t buttons, int8_t dx, int8_t dy);
 bool usb_hid_send_digitizer_report(uint8_t switches, uint16_t x, uint16_t y);
+bool usb_hid_send_keyboard_report(uint8_t modifiers, const uint8_t keycodes[6]);
 
 typedef enum {
     HID_MODE_POINTER = 0,
