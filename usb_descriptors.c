@@ -20,7 +20,7 @@
 #endif
 
 #define TUD_RPI_RESET_DESC_LEN 9
-#define USBD_DESC_LEN (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_RPI_RESET_DESC_LEN + 3*TUD_HID_DESC_LEN)
+#define USBD_DESC_LEN (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_RPI_RESET_DESC_LEN + 4*TUD_HID_DESC_LEN)
 
 #if !PICO_STDIO_USB_DEVICE_SELF_POWERED
 #define USBD_CONFIGURATION_DESCRIPTOR_ATTRIBUTE 0
@@ -35,7 +35,8 @@
 #define USBD_ITF_HID_POINTER 3
 #define USBD_ITF_HID_DIGITIZER 4
 #define USBD_ITF_HID_KEYBOARD 5
-#define USBD_ITF_MAX 6
+#define USBD_ITF_HID_CONSUMER_CONTROL 6
+#define USBD_ITF_MAX 7
 
 #define USBD_CDC_EP_CMD 0x81
 #define USBD_CDC_EP_OUT 0x02
@@ -43,6 +44,7 @@
 #define USBD_HID_POINTER_EP_IN 0x83
 #define USBD_HID_DIGITIZER_EP_IN 0x84
 #define USBD_HID_KEYBOARD_EP_IN 0x85
+#define USBD_HID_CONSUMER_CONTROL_EP_IN 0x86
 
 #define USBD_CDC_CMD_MAX_SIZE 8
 #define USBD_CDC_IN_OUT_MAX_SIZE 64
@@ -58,6 +60,7 @@
 #define USBD_STR_HID_POINTER 0x06
 #define USBD_STR_HID_DIGITIZER 0x07
 #define USBD_STR_HID_KEYBOARD 0x08
+#define USBD_STR_HID_CONSUMER_CONTROL 0x09
 
 #define TUD_RPI_RESET_DESCRIPTOR(_itfnum, _stridx) \
     9, TUSB_DESC_INTERFACE, _itfnum, 0, 0, TUSB_CLASS_VENDOR_SPECIFIC, RESET_INTERFACE_SUBCLASS, RESET_INTERFACE_PROTOCOL, _stridx
@@ -166,6 +169,21 @@ static const uint8_t hid_report_desc_keyboard[] = {
         0xC0
 };
 
+static const uint8_t hid_report_desc_consumer_control[] = {
+    0x05, 0x0C,                  // Usage Page (Consumer Devices)
+    0x09, 0x01,                  // Usage (Consumer Control)
+    0xA1, 0x01,                  // Collection (Application)
+      0x85, 0x04,                // Report ID (4)
+      0x15, 0x00,                // Logical Minimum (0)
+      0x26, 0xFF, 0x03,          // Logical Maximum (1023)
+      0x19, 0x00,                // Usage Minimum (0)
+      0x2A, 0xFF, 0x03,          // Usage Maximum (1023)
+      0x75, 0x10,                // Report Size (16 bits)
+      0x95, 0x01,                // Report Count (1)
+      0x81, 0x00,                // Input (Data,Array,Absolute)
+    0xC0                         // End Collection
+};
+
 static const uint8_t usbd_desc_cfg[USBD_DESC_LEN] = {
     TUD_CONFIG_DESCRIPTOR(
         1,
@@ -212,6 +230,15 @@ static const uint8_t usbd_desc_cfg[USBD_DESC_LEN] = {
         USBD_HID_KEYBOARD_EP_IN,
         USBD_HID_EP_SIZE,
         USBD_HID_POLL_MS),
+
+    TUD_HID_DESCRIPTOR(
+        USBD_ITF_HID_CONSUMER_CONTROL,
+        USBD_STR_HID_CONSUMER_CONTROL,
+        HID_ITF_PROTOCOL_NONE,
+        sizeof(hid_report_desc_consumer_control),
+        USBD_HID_CONSUMER_CONTROL_EP_IN,
+        USBD_HID_EP_SIZE,
+        USBD_HID_POLL_MS),
 };
 
 static char usbd_serial_str[PICO_UNIQUE_BOARD_ID_SIZE_BYTES * 2 + 1];
@@ -225,6 +252,7 @@ static const char *const usbd_desc_str[] = {
     [USBD_STR_HID_POINTER] = "HID Pointer",
     [USBD_STR_HID_DIGITIZER] = "HID Digitizer",
     [USBD_STR_HID_KEYBOARD] = "HID Keyboard",
+    [USBD_STR_HID_CONSUMER_CONTROL] = "HID Consumer Control",
 };
 
 const uint8_t *tud_descriptor_device_cb(void) {
@@ -273,6 +301,8 @@ const uint8_t *tud_hid_descriptor_report_cb(uint8_t instance) {
         return hid_report_desc_digitizer;
     } else if (instance == 2) {
         return hid_report_desc_keyboard;
+    } else if (instance == 3) {
+        return hid_report_desc_consumer_control;
     }
     return NULL;
 }
@@ -341,4 +371,17 @@ bool usb_hid_send_keyboard_report(uint8_t modifiers, const uint8_t keycodes[6]) 
     }
 
     return tud_hid_n_report(2, 3, report, sizeof(report));
+}
+
+bool usb_hid_consumer_control_ready(void) {
+    return tud_hid_n_ready(3);
+}
+
+bool usb_hid_send_consumer_control_report(uint16_t keycode) {
+    uint8_t report[2];
+
+    report[0] = (uint8_t)(keycode & 0xFF);
+    report[1] = (uint8_t)((keycode >> 8) & 0xFF);
+
+    return tud_hid_n_report(3, 4, report, sizeof(report));
 }

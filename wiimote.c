@@ -75,9 +75,11 @@ static wiimote_tracking_state_t wiimote_state;
 bool usb_hid_pointer_ready(void);
 bool usb_hid_digitizer_ready(void);
 bool usb_hid_keyboard_ready(void);
+bool usb_hid_consumer_control_ready(void);
 bool usb_hid_send_pointer_report(uint8_t buttons, int8_t dx, int8_t dy);
 bool usb_hid_send_digitizer_report(uint8_t switches, uint16_t x, uint16_t y);
 bool usb_hid_send_keyboard_report(uint8_t modifiers, const uint8_t keycodes[6]);
+bool usb_hid_send_consumer_control_report(uint16_t keycode);
 
 #define HID_KEY_UP_ARROW 0x52
 #define HID_KEY_DOWN_ARROW 0x51
@@ -85,9 +87,10 @@ bool usb_hid_send_keyboard_report(uint8_t modifiers, const uint8_t keycodes[6]);
 #define HID_KEY_RIGHT_ARROW 0x4F
 #define HID_KEY_HOME 0x4A
 #define HID_KEY_ESCAPE 0x29
-#define HID_KEY_MUTE 0x7F
-#define HID_KEY_VOLUME_UP 0x80
-#define HID_KEY_VOLUME_DOWN 0x81
+
+#define HID_CONSUMER_VOLUME_UP 0xE9
+#define HID_CONSUMER_VOLUME_DOWN 0xEA
+#define HID_CONSUMER_MUTE 0xE2
 
 typedef enum {
     HID_MODE_POINTER = 0,
@@ -101,6 +104,7 @@ static uint16_t pointer_prev_norm_x;
 static uint16_t pointer_prev_norm_y;
 static bool pointer_motion_locked;
 static bool pointer_prev_norm_valid;
+static uint32_t prev_consumer_buttons = 0;
 
 static void reset_pointer_motion_state(void) {
     pointer_had_tracking = false;
@@ -660,14 +664,37 @@ static void send_hid_keyboard_report(const wiimote_tracking_state_t *state) {
     if (state->buttons & 0x0400u) add_hid_key(keycodes, &key_count, HID_KEY_DOWN_ARROW);
     if (state->buttons & 0x0100u) add_hid_key(keycodes, &key_count, HID_KEY_LEFT_ARROW);
     if (state->buttons & 0x0200u) add_hid_key(keycodes, &key_count, HID_KEY_RIGHT_ARROW);
-
-    if (state->buttons & 0x0002u) add_hid_key(keycodes, &key_count, HID_KEY_VOLUME_UP);
-    if (state->buttons & 0x0001u) add_hid_key(keycodes, &key_count, HID_KEY_VOLUME_DOWN);
     if (state->buttons & 0x0080u) add_hid_key(keycodes, &key_count, HID_KEY_HOME);
-    if (state->buttons & 0x1000u) add_hid_key(keycodes, &key_count, HID_KEY_MUTE);
     if (state->buttons & 0x0010u) add_hid_key(keycodes, &key_count, HID_KEY_ESCAPE);
 
     usb_hid_send_keyboard_report(0, keycodes);
+}
+
+static void send_hid_consumer_control_report(const wiimote_tracking_state_t *state) {
+    if (!hid_connected || !usb_hid_consumer_control_ready()) {
+        return;
+    }
+
+    // Extract only the consumer control buttons
+    uint32_t consumer_buttons = state->buttons & (0x0001u | 0x0002u | 0x1000u);
+
+    // Only send if the button state changed
+    if (consumer_buttons == prev_consumer_buttons) {
+        return;
+    }
+    prev_consumer_buttons = consumer_buttons;
+
+    uint16_t keycode = 0;
+
+    if (state->buttons & 0x0002u) {
+        keycode = HID_CONSUMER_VOLUME_UP;
+    } else if (state->buttons & 0x0001u) {
+        keycode = HID_CONSUMER_VOLUME_DOWN;
+    } else if (state->buttons & 0x1000u) {
+        keycode = HID_CONSUMER_MUTE;
+    }
+
+    usb_hid_send_consumer_control_report(keycode);
 }
 
 static void hid_report_timer_handler_state(const wiimote_tracking_state_t *state, btstack_timer_source_t *ts) {
@@ -675,6 +702,7 @@ static void hid_report_timer_handler_state(const wiimote_tracking_state_t *state
 
     if (hid_connected) {
         send_hid_keyboard_report(state);
+        send_hid_consumer_control_report(state);
         if (hid_output_mode == HID_MODE_POINTER) {
             send_hid_pointer_report(state);
         } else if (hid_output_mode == HID_MODE_DIGITIZER) {
@@ -932,6 +960,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     hid_connected = true;
                     wiimote_tracking_state_reset_session(&wiimote_state);
                     reset_pointer_motion_state();
+                    prev_consumer_buttons = 0;
                     reset_inactivity_timer();
                     printf("Wii Remote connected\n");
                     break;
@@ -970,6 +999,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     btstack_run_loop_remove_timer(&inactivity_timer);
                     wiimote_tracking_state_reset_session(&wiimote_state);
                     reset_pointer_motion_state();
+                    prev_consumer_buttons = 0;
                     start_scan();
                     break;
 
@@ -1014,9 +1044,10 @@ void wiimote_init(void) {
 
     hid_host_setup();
 
-    btstack_run_loop_set_timer_handler(&button_print_timer, button_print_timer_handler);
-    btstack_run_loop_set_timer(&button_print_timer, BUTTON_PRINT_PERIOD_MS);
-    btstack_run_loop_add_timer(&button_print_timer);
+    // Enable for debugging button and IR state
+    // btstack_run_loop_set_timer_handler(&button_print_timer, button_print_timer_handler);
+    // btstack_run_loop_set_timer(&button_print_timer, BUTTON_PRINT_PERIOD_MS);
+    // btstack_run_loop_add_timer(&button_print_timer);
 
     btstack_run_loop_set_timer_handler(&hid_report_timer, hid_report_timer_handler);
     btstack_run_loop_set_timer(&hid_report_timer, 10);
