@@ -15,7 +15,11 @@
 #define WIIMOTE_IR_POINTS 4
 #define POINTER_GAIN_X 3
 #define POINTER_GAIN_Y 1
-#define INACTIVITY_TIMEOUT_MS 300000
+#define INACTIVITY_TIMEOUT_MS 60000
+#define WIIMOTE_BUTTON_MASK 0x1F9Fu
+#define INACTIVITY_IR_MOVE_THRESHOLD 12
+#define RECONNECT_COOLDOWN_MS 1000
+#define BT_RESET_POWER_ON_DELAY_MS 600
 
 typedef struct {
     bool valid;
@@ -63,6 +67,8 @@ static btstack_timer_source_t button_print_timer;
 static btstack_timer_source_t ir_init_timer;
 static btstack_timer_source_t connect_retry_timer;
 static btstack_timer_source_t inactivity_timer;
+static btstack_timer_source_t reconnect_cooldown_timer;
+static btstack_timer_source_t bt_reset_timer;
 
 static uint8_t hid_descriptor_storage[MAX_ATTRIBUTE_VALUE_SIZE];
 
@@ -70,6 +76,11 @@ static hid_protocol_mode_t hid_host_report_mode = HID_PROTOCOL_MODE_REPORT;
 static uint16_t hid_host_cid;
 static bool hid_connected;
 static bool pending_connect;
+static bool reconnect_cooldown_active;
+static bool inactivity_disconnect_requested;
+static bool passive_reconnect_mode;
+static bool bt_reset_in_progress;
+static bool bt_reset_waiting_for_power_on;
 static wiimote_tracking_state_t wiimote_state;
 
 bool usb_hid_pointer_ready(void);
@@ -105,6 +116,11 @@ static uint16_t pointer_prev_norm_y;
 static bool pointer_motion_locked;
 static bool pointer_prev_norm_valid;
 static uint32_t prev_consumer_buttons = 0;
+static uint16_t inactivity_prev_buttons = 0;
+static uint16_t prev_raw_buttons = 0;
+static bool inactivity_prev_have_norm = false;
+static uint16_t inactivity_prev_norm_x = 0;
+static uint16_t inactivity_prev_norm_y = 0;
 
 static void reset_pointer_motion_state(void) {
     pointer_had_tracking = false;
@@ -169,6 +185,12 @@ static const char *error_code_to_string(uint8_t status) {
             return "CONNECTION_REJECTED_SECURITY";
         case ERROR_CODE_UNSUPPORTED_FEATURE_OR_PARAMETER_VALUE:
             return "UNSUPPORTED_FEATURE_OR_PARAMETER_VALUE";
+        case ERROR_CODE_PAGE_TIMEOUT:
+            return "PAGE_TIMEOUT";
+        case ERROR_CODE_CONNECTION_TIMEOUT:
+            return "CONNECTION_TIMEOUT";
+        case ERROR_CODE_ACL_CONNECTION_ALREADY_EXISTS:
+            return "ACL_CONNECTION_ALREADY_EXISTS";
         case BTSTACK_MEMORY_ALLOC_FAILED:
             return "BTSTACK_MEMORY_ALLOC_FAILED";
         case L2CAP_CONNECTION_RESPONSE_RESULT_REFUSED_SECURITY:
@@ -180,6 +202,54 @@ static const char *error_code_to_string(uint8_t status) {
 
 static void start_scan(void);
 
+static void request_bt_stack_reset(void) {
+    if (bt_reset_in_progress) {
+        return;
+    }
+
+    bt_reset_in_progress = true;
+    bt_reset_waiting_for_power_on = true;
+
+    btstack_run_loop_remove_timer(&connect_retry_timer);
+    btstack_run_loop_remove_timer(&reconnect_cooldown_timer);
+
+    printf("BT reset: power OFF\n");
+    hci_power_control(HCI_POWER_OFF);
+
+    btstack_run_loop_set_timer(&bt_reset_timer, BT_RESET_POWER_ON_DELAY_MS);
+    btstack_run_loop_add_timer(&bt_reset_timer);
+}
+
+static void bt_reset_timer_handler(btstack_timer_source_t *ts) {
+    (void)ts;
+
+    if (!bt_reset_waiting_for_power_on) {
+        return;
+    }
+
+    bt_reset_waiting_for_power_on = false;
+    printf("BT reset: power ON\n");
+    hci_power_control(HCI_POWER_ON);
+
+    bt_reset_in_progress = false;
+    if (passive_reconnect_mode) {
+        printf("BT reset complete; passive wake mode active. Press any Wii Remote button to reconnect.\n");
+    } else {
+        start_scan();
+    }
+}
+
+static void reconnect_cooldown_timer_handler(btstack_timer_source_t *ts) {
+    (void)ts;
+    reconnect_cooldown_active = false;
+    if (passive_reconnect_mode) {
+        printf("Reconnect cooldown ended; passive wake mode active. Press any Wii Remote button to reconnect.\n");
+    } else {
+        printf("Reconnect cooldown ended; resuming scan/connect\n");
+        start_scan();
+    }
+}
+
 static void connect_retry_timer_handler(btstack_timer_source_t *ts) {
     (void)ts;
     if (!hid_connected) {
@@ -188,6 +258,15 @@ static void connect_retry_timer_handler(btstack_timer_source_t *ts) {
 }
 
 static void start_scan(void) {
+    if (bt_reset_in_progress) {
+        return;
+    }
+    if (reconnect_cooldown_active) {
+        return;
+    }
+    if (passive_reconnect_mode) {
+        return;
+    }
     if (pending_connect || hid_connected) {
         return;
     }
@@ -742,8 +821,50 @@ static void handle_hid_mode_hotkeys(wiimote_tracking_state_t *state, uint16_t bu
     state->previous_buttons_hid_mode = buttons;
 }
 
-static void reset_inactivity_timer(void) {
-    if (hid_connected) {
+static void reset_inactivity_timer(uint16_t buttons) {
+    if (!hid_connected) return;
+    if (buttons == inactivity_prev_buttons) return;
+    printf("Inactivity timer reset (buttons 0x%04x -> 0x%04x)\n", inactivity_prev_buttons, buttons);
+    inactivity_prev_buttons = buttons;
+    btstack_run_loop_remove_timer(&inactivity_timer);
+    btstack_run_loop_set_timer(&inactivity_timer, INACTIVITY_TIMEOUT_MS);
+    btstack_run_loop_add_timer(&inactivity_timer);
+}
+
+static void reset_inactivity_timer_on_ir_activity(const wiimote_tracking_state_t *state) {
+    if (!hid_connected) {
+        return;
+    }
+
+    if (!state->have_norm) {
+        inactivity_prev_have_norm = false;
+        return;
+    }
+
+    if (!inactivity_prev_have_norm) {
+        inactivity_prev_have_norm = true;
+        inactivity_prev_norm_x = state->norm_x;
+        inactivity_prev_norm_y = state->norm_y;
+        printf("Inactivity timer reset (IR acquired at norm=(%u,%u))\n", state->norm_x, state->norm_y);
+        btstack_run_loop_remove_timer(&inactivity_timer);
+        btstack_run_loop_set_timer(&inactivity_timer, INACTIVITY_TIMEOUT_MS);
+        btstack_run_loop_add_timer(&inactivity_timer);
+        return;
+    }
+
+    int16_t dx = (int16_t)state->norm_x - (int16_t)inactivity_prev_norm_x;
+    int16_t dy = (int16_t)state->norm_y - (int16_t)inactivity_prev_norm_y;
+    uint16_t adx = (uint16_t)(dx < 0 ? -dx : dx);
+    uint16_t ady = (uint16_t)(dy < 0 ? -dy : dy);
+
+    if (adx >= INACTIVITY_IR_MOVE_THRESHOLD || ady >= INACTIVITY_IR_MOVE_THRESHOLD) {
+        printf("Inactivity timer reset (IR motion norm=(%u,%u), d=(%d,%d))\n",
+               state->norm_x,
+               state->norm_y,
+               dx,
+               dy);
+        inactivity_prev_norm_x = state->norm_x;
+        inactivity_prev_norm_y = state->norm_y;
         btstack_run_loop_remove_timer(&inactivity_timer);
         btstack_run_loop_set_timer(&inactivity_timer, INACTIVITY_TIMEOUT_MS);
         btstack_run_loop_add_timer(&inactivity_timer);
@@ -753,7 +874,9 @@ static void reset_inactivity_timer(void) {
 static void inactivity_timer_handler(btstack_timer_source_t *ts) {
     (void)ts;
     if (hid_connected) {
-        printf("Inactivity timeout: disconnecting Wii Remote\n");
+        printf("Inactivity timeout (%d ms): disconnecting and entering passive wake mode\n", INACTIVITY_TIMEOUT_MS);
+        inactivity_disconnect_requested = true;
+        passive_reconnect_mode = true;
         hid_host_disconnect(hid_host_cid);
     }
 }
@@ -786,9 +909,23 @@ static void parse_wiimote_report(wiimote_tracking_state_t *state, const uint8_t 
         return;
     }
 
-    reset_inactivity_timer();
+    uint16_t raw_buttons = ((uint16_t)report[2] << 8) | report[3];
+    uint16_t new_buttons = raw_buttons & WIIMOTE_BUTTON_MASK;
 
-    state->buttons = ((uint16_t)report[2] << 8) | report[3];
+    if (raw_buttons != prev_raw_buttons) {
+        uint16_t unknown_mask = (uint16_t)(raw_buttons & ~WIIMOTE_BUTTON_MASK);
+        // if (unknown_mask != 0) {
+        //     printf("Raw button flags changed: raw=0x%04x masked=0x%04x unknown=0x%04x\n",
+        //            raw_buttons,
+        //            new_buttons,
+        //            unknown_mask);
+        // }
+        prev_raw_buttons = raw_buttons;
+    }
+
+    reset_inactivity_timer(new_buttons);
+
+    state->buttons = new_buttons;
     state->have_buttons = true;
     handle_ir_profile_hotkeys(state, state->buttons);
     handle_hid_mode_hotkeys(state, state->buttons);
@@ -803,6 +940,7 @@ static void parse_wiimote_report(wiimote_tracking_state_t *state, const uint8_t 
                    report[16], report[17], report[18]);
         }
         parse_wiimote_ir_extended(state, &report[7], (uint16_t)(report_len - 7));
+        reset_inactivity_timer_on_ir_activity(state);
     }
 }
 
@@ -933,10 +1071,16 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             uint8_t subevent = hci_event_hid_meta_get_subevent_code(packet);
             switch (subevent) {
                 case HID_SUBEVENT_INCOMING_CONNECTION:
-                    hid_host_accept_connection(
-                        hid_subevent_incoming_connection_get_hid_cid(packet),
-                        hid_host_report_mode);
-                    printf("Accepting incoming HID connection\n");
+                    if (reconnect_cooldown_active) {
+                        uint16_t incoming_hid_cid = hid_subevent_incoming_connection_get_hid_cid(packet);
+                        uint8_t status = hid_host_decline_connection(incoming_hid_cid);
+                        printf("Rejecting incoming HID connection during cooldown (status 0x%02x)\n", status);
+                    } else {
+                        hid_host_accept_connection(
+                            hid_subevent_incoming_connection_get_hid_cid(packet),
+                            hid_host_report_mode);
+                        printf("Accepting incoming HID connection\n");
+                    }
                     break;
 
                 case HID_SUBEVENT_CONNECTION_OPENED: {
@@ -958,11 +1102,18 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 
                     hid_host_cid = hid_subevent_connection_opened_get_hid_cid(packet);
                     hid_connected = true;
+                    pending_connect = false;
+                    passive_reconnect_mode = false;
+                    inactivity_disconnect_requested = false;
                     wiimote_tracking_state_reset_session(&wiimote_state);
                     reset_pointer_motion_state();
                     prev_consumer_buttons = 0;
-                    reset_inactivity_timer();
-                    printf("Wii Remote connected\n");
+                    inactivity_prev_buttons = 0xFFFF; // force first reset
+                    inactivity_prev_have_norm = false;
+                    inactivity_prev_norm_x = 0;
+                    inactivity_prev_norm_y = 0;
+                    reset_inactivity_timer(0x0000);
+                    printf("Wii Remote connected, inactivity timer started (%d ms)\n", INACTIVITY_TIMEOUT_MS);
                     break;
                 }
 
@@ -996,11 +1147,26 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     printf("Wii Remote disconnected\n");
                     hid_connected = false;
                     hid_host_cid = 0;
+                    pending_connect = false;
                     btstack_run_loop_remove_timer(&inactivity_timer);
+                    btstack_run_loop_remove_timer(&connect_retry_timer);
                     wiimote_tracking_state_reset_session(&wiimote_state);
                     reset_pointer_motion_state();
                     prev_consumer_buttons = 0;
-                    start_scan();
+                    inactivity_prev_have_norm = false;
+                    inactivity_prev_norm_x = 0;
+                    inactivity_prev_norm_y = 0;
+                    if (inactivity_disconnect_requested) {
+                        inactivity_disconnect_requested = false;
+                        request_bt_stack_reset();
+                        reconnect_cooldown_active = true;
+                        printf("Inactivity disconnect: waiting %d ms before reconnect\n", RECONNECT_COOLDOWN_MS);
+                        btstack_run_loop_set_timer(&reconnect_cooldown_timer, RECONNECT_COOLDOWN_MS);
+                        btstack_run_loop_add_timer(&reconnect_cooldown_timer);
+                    } else {
+                        passive_reconnect_mode = false;
+                        start_scan();
+                    }
                     break;
 
                 default:
@@ -1033,6 +1199,8 @@ static void hid_host_setup(void) {
     btstack_run_loop_set_timer_handler(&ir_init_timer, wiimote_ir_init_timer_handler);
     btstack_run_loop_set_timer_handler(&inactivity_timer, inactivity_timer_handler);
     btstack_run_loop_set_timer_handler(&connect_retry_timer, connect_retry_timer_handler);
+    btstack_run_loop_set_timer_handler(&reconnect_cooldown_timer, reconnect_cooldown_timer_handler);
+    btstack_run_loop_set_timer_handler(&bt_reset_timer, bt_reset_timer_handler);
 }
 
 void wiimote_init(void) {
