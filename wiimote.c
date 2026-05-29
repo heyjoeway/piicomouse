@@ -15,11 +15,12 @@
 #define WIIMOTE_IR_POINTS 4
 #define POINTER_GAIN_X 3
 #define POINTER_GAIN_Y 1
-#define INACTIVITY_TIMEOUT_MS 60000
+#define INACTIVITY_TIMEOUT_MS 300000
 #define WIIMOTE_BUTTON_MASK 0x1F9Fu
 #define INACTIVITY_IR_MOVE_THRESHOLD 12
 #define RECONNECT_COOLDOWN_MS 1000
 #define NO_IR_ENTER_THRESHOLD_FRAMES 5
+#define WIIMOTE_LED_RIGHTMOST_MASK 0x80
 #define BT_RESET_POWER_ON_DELAY_MS 600
 
 typedef struct {
@@ -396,6 +397,14 @@ static uint8_t wiimote_send_output_report(uint16_t report_id, const uint8_t *dat
     return status;
 }
 
+static void set_wiimote_rightmost_led(void) {
+    uint8_t led_payload[1] = {WIIMOTE_LED_RIGHTMOST_MASK};
+    uint8_t status = wiimote_send_output_report(0x11, led_payload, sizeof(led_payload));
+    if (status == ERROR_CODE_SUCCESS || status == ERROR_CODE_COMMAND_DISALLOWED) {
+        printf("Set Wii Remote LEDs: rightmost ON\n");
+    }
+}
+
 static uint8_t wiimote_write_memory_checked(uint32_t address, const uint8_t *data, uint8_t len) {
     uint8_t payload[21];
 
@@ -506,6 +515,7 @@ static void wiimote_ir_init_timer_handler_state(wiimote_tracking_state_t *state,
     if (state->ir_init_step >= WIIMOTE_IR_INIT_DONE) {
         state->ir_init_in_progress = false;
         printf("Wii IR init sequence complete\n");
+        set_wiimote_rightmost_led();
         return;
     }
 
@@ -1127,6 +1137,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     passive_reconnect_mode = false;
                     inactivity_disconnect_requested = false;
                     wiimote_tracking_state_reset_session(&wiimote_state);
+                    set_wiimote_rightmost_led();
                     reset_pointer_motion_state();
                     prev_consumer_buttons = 0;
                     inactivity_prev_buttons = 0xFFFF; // force first reset
@@ -1142,6 +1153,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     uint8_t status = hid_subevent_descriptor_available_get_status(packet);
                     if (status == ERROR_CODE_SUCCESS) {
                         printf("HID descriptor ready, enabling IR report mode\n");
+                        set_wiimote_rightmost_led();
                         request_wiimote_ir_report(&wiimote_state);
                     } else {
                         printf("Descriptor unavailable (0x%02x)\n", status);
