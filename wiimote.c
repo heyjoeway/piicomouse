@@ -4,6 +4,10 @@
 #include "pico/cyw43_arch.h"
 #include "pico/stdlib.h"
 
+#include "hardware/structs/ioqspi.h"
+#include "hardware/structs/sio.h"
+#include "hardware/sync.h"
+
 #include "btstack_config.h"
 #include "btstack.h"
 #include "wiimote.h"
@@ -11,10 +15,11 @@
 #define INQUIRY_SECONDS 5
 #define CONNECT_RETRY_MS 1500
 #define BUTTON_PRINT_PERIOD_MS 200
+#define BOOTSEL_POLL_PERIOD_MS 1000
 #define MAX_ATTRIBUTE_VALUE_SIZE 300
 #define WIIMOTE_IR_POINTS 4
-#define POINTER_GAIN_X 3
-#define POINTER_GAIN_Y 1
+#define POINTER_GAIN_X 3.0f
+#define POINTER_GAIN_Y 1.25f
 #define INACTIVITY_TIMEOUT_MS 300000
 #define WIIMOTE_BUTTON_MASK 0x1F9Fu
 #define INACTIVITY_IR_MOVE_THRESHOLD 12
@@ -66,6 +71,7 @@ static const char *wii_name_prefix = "Nintendo RVL-CNT-01";
 
 static btstack_packet_callback_registration_t hci_event_callback_registration;
 static btstack_timer_source_t button_print_timer;
+static btstack_timer_source_t bootsel_poll_timer;
 static btstack_timer_source_t ir_init_timer;
 static btstack_timer_source_t connect_retry_timer;
 static btstack_timer_source_t inactivity_timer;
@@ -1017,6 +1023,45 @@ static void button_print_timer_handler(btstack_timer_source_t *ts) {
     button_print_timer_handler_state(&wiimote_state, ts);
 }
 
+static bool __no_inline_not_in_flash_func(read_bootsel_button_pressed)(void) {
+    const uint cs_pin_index = 1;
+    uint32_t flags = save_and_disable_interrupts();
+
+    // Float QSPI CS so the BOOTSEL switch can pull it low while XIP is paused.
+    hw_write_masked(&ioqspi_hw->io[cs_pin_index].ctrl,
+                    GPIO_OVERRIDE_LOW << IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_LSB,
+                    IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_BITS);
+
+    for (volatile int i = 0; i < 1000; ++i) {
+    }
+
+#ifdef __ARM_ARCH_6M__
+    const uint32_t cs_bit = (1u << 1);
+#else
+    const uint32_t cs_bit = SIO_GPIO_HI_IN_QSPI_CSN_BITS;
+#endif
+    bool cs_high = (sio_hw->gpio_hi_in & cs_bit) != 0;
+
+    hw_write_masked(&ioqspi_hw->io[cs_pin_index].ctrl,
+                    GPIO_OVERRIDE_NORMAL << IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_LSB,
+                    IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_BITS);
+
+    restore_interrupts(flags);
+
+    // BOOTSEL pulls CS low when pressed.
+    return !cs_high;
+}
+
+static void bootsel_poll_timer_handler(btstack_timer_source_t *ts) {
+    (void)ts;
+
+    bool pressed = read_bootsel_button_pressed();
+    printf("BOOTSEL: %s\n", pressed ? "pressed" : "released");
+
+    btstack_run_loop_set_timer(&bootsel_poll_timer, BOOTSEL_POLL_PERIOD_MS);
+    btstack_run_loop_add_timer(&bootsel_poll_timer);
+}
+
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
     UNUSED(channel);
     UNUSED(size);
@@ -1236,6 +1281,7 @@ static void hid_host_setup(void) {
     btstack_run_loop_set_timer_handler(&connect_retry_timer, connect_retry_timer_handler);
     btstack_run_loop_set_timer_handler(&reconnect_cooldown_timer, reconnect_cooldown_timer_handler);
     btstack_run_loop_set_timer_handler(&bt_reset_timer, bt_reset_timer_handler);
+    btstack_run_loop_set_timer_handler(&bootsel_poll_timer, bootsel_poll_timer_handler);
 }
 
 void wiimote_init(void) {
@@ -1255,4 +1301,7 @@ void wiimote_init(void) {
     btstack_run_loop_set_timer_handler(&hid_report_timer, hid_report_timer_handler);
     btstack_run_loop_set_timer(&hid_report_timer, 10);
     btstack_run_loop_add_timer(&hid_report_timer);
+
+    btstack_run_loop_set_timer(&bootsel_poll_timer, BOOTSEL_POLL_PERIOD_MS);
+    btstack_run_loop_add_timer(&bootsel_poll_timer);
 }
