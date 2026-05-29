@@ -19,6 +19,7 @@
 #define WIIMOTE_BUTTON_MASK 0x1F9Fu
 #define INACTIVITY_IR_MOVE_THRESHOLD 12
 #define RECONNECT_COOLDOWN_MS 1000
+#define NO_IR_ENTER_THRESHOLD_FRAMES 5
 #define BT_RESET_POWER_ON_DELAY_MS 600
 
 typedef struct {
@@ -98,6 +99,7 @@ bool usb_hid_send_consumer_control_report(uint16_t keycode);
 #define HID_KEY_RIGHT_ARROW 0x4F
 #define HID_KEY_HOME 0x4A
 #define HID_KEY_ESCAPE 0x29
+#define HID_KEY_ENTER 0x28
 
 #define HID_CONSUMER_VOLUME_UP 0xE9
 #define HID_CONSUMER_VOLUME_DOWN 0xEA
@@ -121,6 +123,7 @@ static uint16_t prev_raw_buttons = 0;
 static bool inactivity_prev_have_norm = false;
 static uint16_t inactivity_prev_norm_x = 0;
 static uint16_t inactivity_prev_norm_y = 0;
+static uint8_t pointer_no_ir_frames = 0;
 
 static void reset_pointer_motion_state(void) {
     pointer_had_tracking = false;
@@ -128,6 +131,11 @@ static void reset_pointer_motion_state(void) {
     pointer_prev_norm_y = 0;
     pointer_motion_locked = false;
     pointer_prev_norm_valid = false;
+    pointer_no_ir_frames = 0;
+}
+
+static bool pointer_should_send_enter_with_a(void) {
+    return (hid_output_mode == HID_MODE_POINTER) && (pointer_no_ir_frames >= NO_IR_ENTER_THRESHOLD_FRAMES);
 }
 
 enum {
@@ -656,7 +664,7 @@ static void send_hid_pointer_report(const wiimote_tracking_state_t *state) {
     }
 
     uint8_t buttons = 0;
-    if (state->buttons & 0x0008) buttons |= 0x01;
+    if ((state->buttons & 0x0008u) && !pointer_should_send_enter_with_a()) buttons |= 0x01;
 
     bool movement_lock_requested = (buttons != 0) && ((state->buttons & 0x0004u) == 0);
     int8_t dx = 0;
@@ -745,6 +753,9 @@ static void send_hid_keyboard_report(const wiimote_tracking_state_t *state) {
     if (state->buttons & 0x0200u) add_hid_key(keycodes, &key_count, HID_KEY_RIGHT_ARROW);
     if (state->buttons & 0x0080u) add_hid_key(keycodes, &key_count, HID_KEY_HOME);
     if (state->buttons & 0x0010u) add_hid_key(keycodes, &key_count, HID_KEY_ESCAPE);
+    if ((state->buttons & 0x0008u) && pointer_should_send_enter_with_a()) {
+        add_hid_key(keycodes, &key_count, HID_KEY_ENTER);
+    }
 
     usb_hid_send_keyboard_report(0, keycodes);
 }
@@ -941,6 +952,16 @@ static void parse_wiimote_report(wiimote_tracking_state_t *state, const uint8_t 
         }
         parse_wiimote_ir_extended(state, &report[7], (uint16_t)(report_len - 7));
         reset_inactivity_timer_on_ir_activity(state);
+    }
+
+    if (hid_output_mode == HID_MODE_POINTER) {
+        if (state->have_norm) {
+            pointer_no_ir_frames = 0;
+        } else if (pointer_no_ir_frames < 0xFFu) {
+            pointer_no_ir_frames++;
+        }
+    } else {
+        pointer_no_ir_frames = 0;
     }
 }
 
