@@ -131,6 +131,7 @@ static bool inactivity_prev_have_norm = false;
 static uint16_t inactivity_prev_norm_x = 0;
 static uint16_t inactivity_prev_norm_y = 0;
 static uint8_t pointer_no_ir_frames = 0;
+static bool onboard_led_on = false;
 
 static void reset_pointer_motion_state(void) {
     pointer_had_tracking = false;
@@ -1057,6 +1058,9 @@ static void bootsel_poll_timer_handler(btstack_timer_source_t *ts) {
 
     bool pressed = read_bootsel_button_pressed();
     printf("BOOTSEL: %s\n", pressed ? "pressed" : "released");
+
+    onboard_led_on = !onboard_led_on;
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, onboard_led_on ? 1 : 0);
 
     btstack_run_loop_set_timer(&bootsel_poll_timer, BOOTSEL_POLL_PERIOD_MS);
     btstack_run_loop_add_timer(&bootsel_poll_timer);
