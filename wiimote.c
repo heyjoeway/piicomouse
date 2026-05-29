@@ -98,10 +98,10 @@ bool usb_hid_send_consumer_control_report(uint16_t keycode);
 #define HID_KEY_DOWN_ARROW 0x51
 #define HID_KEY_LEFT_ARROW 0x50
 #define HID_KEY_RIGHT_ARROW 0x4F
-#define HID_KEY_HOME 0x4A
-#define HID_KEY_ESCAPE 0x29
 #define HID_KEY_ENTER 0x28
 
+#define HID_CONSUMER_AC_HOME 0x0223
+#define HID_CONSUMER_AC_BACK 0x0224
 #define HID_CONSUMER_VOLUME_UP 0xE9
 #define HID_CONSUMER_VOLUME_DOWN 0xEA
 #define HID_CONSUMER_MUTE 0xE2
@@ -761,8 +761,6 @@ static void send_hid_keyboard_report(const wiimote_tracking_state_t *state) {
     if (state->buttons & 0x0400u) add_hid_key(keycodes, &key_count, HID_KEY_DOWN_ARROW);
     if (state->buttons & 0x0100u) add_hid_key(keycodes, &key_count, HID_KEY_LEFT_ARROW);
     if (state->buttons & 0x0200u) add_hid_key(keycodes, &key_count, HID_KEY_RIGHT_ARROW);
-    if (state->buttons & 0x0080u) add_hid_key(keycodes, &key_count, HID_KEY_HOME);
-    if (state->buttons & 0x0010u) add_hid_key(keycodes, &key_count, HID_KEY_ESCAPE);
     if ((state->buttons & 0x0008u) && pointer_should_send_enter_with_a()) {
         add_hid_key(keycodes, &key_count, HID_KEY_ENTER);
     }
@@ -776,7 +774,7 @@ static void send_hid_consumer_control_report(const wiimote_tracking_state_t *sta
     }
 
     // Extract only the consumer control buttons
-    uint32_t consumer_buttons = state->buttons & (0x0001u | 0x0002u | 0x1000u);
+    uint32_t consumer_buttons = state->buttons & (0x0001u | 0x0002u | 0x0010u | 0x0080u | 0x1000u);
 
     // Only send if the button state changed
     if (consumer_buttons == prev_consumer_buttons) {
@@ -786,7 +784,11 @@ static void send_hid_consumer_control_report(const wiimote_tracking_state_t *sta
 
     uint16_t keycode = 0;
 
-    if (state->buttons & 0x0002u) {
+    if (state->buttons & 0x0080u) {
+        keycode = HID_CONSUMER_AC_HOME;
+    } else if (state->buttons & 0x0010u) {
+        keycode = HID_CONSUMER_AC_BACK;
+    } else if (state->buttons & 0x0002u) {
         keycode = HID_CONSUMER_VOLUME_UP;
     } else if (state->buttons & 0x0001u) {
         keycode = HID_CONSUMER_VOLUME_DOWN;
