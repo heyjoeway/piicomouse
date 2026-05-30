@@ -154,6 +154,7 @@ static bool passive_reconnect_mode;
 static bool bt_reset_in_progress;
 static bool bt_reset_waiting_for_power_on;
 static bool sync_mode_active;
+static hci_con_handle_t wiimote_con_handle = HCI_CON_HANDLE_INVALID;
 static wiimote_tracking_state_t wiimote_state;
 
 bool usb_hid_pointer_ready(void);
@@ -173,9 +174,12 @@ bool usb_hid_send_consumer_control_report(uint16_t keycode);
 
 #define HID_CONSUMER_AC_HOME 0x0223
 #define HID_CONSUMER_AC_BACK 0x0224
+#define HID_CONSUMER_SLEEP 0x32
 #define HID_CONSUMER_VOLUME_UP 0xE9
 #define HID_CONSUMER_VOLUME_DOWN 0xEA
 #define HID_CONSUMER_MUTE 0xE2
+
+#define WIIMOTE_DISCONNECT_REASON_POWER_OFF 0x15
 
 typedef enum {
     HID_MODE_POINTER = 0,
@@ -199,12 +203,46 @@ static uint8_t pointer_no_ir_frames = 0;
 static bool onboard_led_on = false;
 static bool bootsel_prev_pressed = false;
 
+typedef enum {
+    HID_SLEEP_SIGNAL_IDLE = 0,
+    HID_SLEEP_SIGNAL_PRESS_PENDING,
+    HID_SLEEP_SIGNAL_RELEASE_PENDING,
+} hid_sleep_signal_stage_t;
+
+static hid_sleep_signal_stage_t hid_sleep_signal_stage = HID_SLEEP_SIGNAL_IDLE;
+
 static void set_onboard_led(bool on) {
     if (onboard_led_on == on) {
         return;
     }
     onboard_led_on = on;
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, on ? 1 : 0);
+}
+
+static void queue_hid_sleep_signal(void) {
+    hid_sleep_signal_stage = HID_SLEEP_SIGNAL_PRESS_PENDING;
+    printf("Queued HID Sleep signal (disconnect reason 0x%02x)\n", WIIMOTE_DISCONNECT_REASON_POWER_OFF);
+}
+
+static bool process_hid_sleep_signal(void) {
+    if (hid_sleep_signal_stage == HID_SLEEP_SIGNAL_IDLE) {
+        return false;
+    }
+    if (!usb_hid_consumer_control_ready()) {
+        return true;
+    }
+
+    if (hid_sleep_signal_stage == HID_SLEEP_SIGNAL_PRESS_PENDING) {
+        usb_hid_send_consumer_control_report(HID_CONSUMER_SLEEP);
+        hid_sleep_signal_stage = HID_SLEEP_SIGNAL_RELEASE_PENDING;
+        return true;
+    }
+
+    usb_hid_send_consumer_control_report(0);
+    prev_consumer_buttons = 0;
+    hid_sleep_signal_stage = HID_SLEEP_SIGNAL_IDLE;
+    printf("Sent HID Sleep press+release\n");
+    return true;
 }
 
 static uint32_t target_addr_checksum(const uint8_t addr[6]) {
@@ -996,6 +1034,12 @@ static void send_hid_consumer_control_report(const wiimote_tracking_state_t *sta
 static void hid_report_timer_handler_state(const wiimote_tracking_state_t *state, btstack_timer_source_t *ts) {
     (void)ts;
 
+    if (process_hid_sleep_signal()) {
+        btstack_run_loop_set_timer(&hid_report_timer, 10);
+        btstack_run_loop_add_timer(&hid_report_timer);
+        return;
+    }
+
     if (hid_connected) {
         send_hid_keyboard_report(state);
         send_hid_consumer_control_report(state);
@@ -1376,6 +1420,20 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             }
             break;
 
+        case HCI_EVENT_DISCONNECTION_COMPLETE: {
+            uint16_t con_handle = hci_event_disconnection_complete_get_connection_handle(packet);
+            uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
+
+            if (wiimote_con_handle != HCI_CON_HANDLE_INVALID && con_handle == wiimote_con_handle) {
+                printf("Wii ACL disconnection reason: 0x%02x\n", reason);
+                if (reason == WIIMOTE_DISCONNECT_REASON_POWER_OFF) {
+                    queue_hid_sleep_signal();
+                }
+                wiimote_con_handle = HCI_CON_HANDLE_INVALID;
+            }
+            break;
+        }
+
         case HCI_EVENT_HID_META: {
             uint8_t subevent = hci_event_hid_meta_get_subevent_code(packet);
             switch (subevent) {
@@ -1403,6 +1461,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                         }
                         hid_connected = false;
                         hid_host_cid = 0;
+                        wiimote_con_handle = HCI_CON_HANDLE_INVALID;
                         pending_connect = false;
                         if (sync_mode_active) {
                             start_scan();
@@ -1414,6 +1473,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     }
 
                     hid_host_cid = hid_subevent_connection_opened_get_hid_cid(packet);
+                    wiimote_con_handle = hid_subevent_connection_opened_get_con_handle(packet);
                     hid_connected = true;
                     pending_connect = false;
                     passive_reconnect_mode = false;
