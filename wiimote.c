@@ -14,6 +14,10 @@
 #include "btstack.h"
 #include "wiimote.h"
 
+bool tud_suspended(void);
+bool tud_remote_wakeup(void);
+bool tud_mounted(void);
+
 #define INQUIRY_SECONDS 5
 #define CONNECT_RETRY_MS 1500
 #define BUTTON_PRINT_PERIOD_MS 200
@@ -211,6 +215,14 @@ typedef enum {
 
 static hid_sleep_signal_stage_t hid_sleep_signal_stage = HID_SLEEP_SIGNAL_IDLE;
 
+typedef enum {
+    HID_WAKE_NUDGE_IDLE = 0,
+    HID_WAKE_NUDGE_POSITIVE_PENDING,
+    HID_WAKE_NUDGE_NEGATIVE_PENDING,
+} hid_wake_nudge_stage_t;
+
+static hid_wake_nudge_stage_t hid_wake_nudge_stage = HID_WAKE_NUDGE_IDLE;
+
 static void set_onboard_led(bool on) {
     if (onboard_led_on == on) {
         return;
@@ -219,9 +231,29 @@ static void set_onboard_led(bool on) {
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, on ? 1 : 0);
 }
 
+static void request_usb_remote_wake_on_reconnect(void) {
+    if (!tud_mounted()) {
+        printf("USB remote wake on reconnect: skipped (not mounted)\n");
+        return;
+    }
+
+    if (!tud_suspended()) {
+        printf("USB remote wake on reconnect: skipped (host not suspended)\n");
+        return;
+    }
+
+    bool requested = tud_remote_wakeup();
+    printf("USB remote wake on reconnect: %s\n", requested ? "requested" : "not allowed");
+}
+
 static void queue_hid_sleep_signal(void) {
     hid_sleep_signal_stage = HID_SLEEP_SIGNAL_PRESS_PENDING;
     printf("Queued HID Sleep signal (disconnect reason 0x%02x)\n", WIIMOTE_DISCONNECT_REASON_POWER_OFF);
+}
+
+static void queue_hid_wake_nudge(void) {
+    hid_wake_nudge_stage = HID_WAKE_NUDGE_POSITIVE_PENDING;
+    printf("Queued HID wake nudge\n");
 }
 
 static bool process_hid_sleep_signal(void) {
@@ -242,6 +274,26 @@ static bool process_hid_sleep_signal(void) {
     prev_consumer_buttons = 0;
     hid_sleep_signal_stage = HID_SLEEP_SIGNAL_IDLE;
     printf("Sent HID Sleep press+release\n");
+    return true;
+}
+
+static bool process_hid_wake_nudge(void) {
+    if (hid_wake_nudge_stage == HID_WAKE_NUDGE_IDLE) {
+        return false;
+    }
+    if (!hid_connected || !usb_hid_pointer_ready()) {
+        return true;
+    }
+
+    if (hid_wake_nudge_stage == HID_WAKE_NUDGE_POSITIVE_PENDING) {
+        usb_hid_send_pointer_report(0, 1, 0);
+        hid_wake_nudge_stage = HID_WAKE_NUDGE_NEGATIVE_PENDING;
+        return true;
+    }
+
+    usb_hid_send_pointer_report(0, -1, 0);
+    hid_wake_nudge_stage = HID_WAKE_NUDGE_IDLE;
+    printf("Sent HID wake nudge\n");
     return true;
 }
 
@@ -1040,6 +1092,12 @@ static void hid_report_timer_handler_state(const wiimote_tracking_state_t *state
         return;
     }
 
+    if (process_hid_wake_nudge()) {
+        btstack_run_loop_set_timer(&hid_report_timer, 10);
+        btstack_run_loop_add_timer(&hid_report_timer);
+        return;
+    }
+
     if (hid_connected) {
         send_hid_keyboard_report(state);
         send_hid_consumer_control_report(state);
@@ -1478,6 +1536,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     pending_connect = false;
                     passive_reconnect_mode = false;
                     inactivity_disconnect_requested = false;
+
+                    request_usb_remote_wake_on_reconnect();
+                    queue_hid_wake_nudge();
 
                     bd_addr_t connected_addr;
                     hid_subevent_connection_opened_get_bd_addr(packet, connected_addr);
