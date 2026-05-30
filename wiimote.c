@@ -165,10 +165,12 @@ bool usb_hid_pointer_ready(void);
 bool usb_hid_digitizer_ready(void);
 bool usb_hid_keyboard_ready(void);
 bool usb_hid_consumer_control_ready(void);
+bool usb_hid_gamepad_ready(void);
 bool usb_hid_send_pointer_report(uint8_t buttons, int8_t dx, int8_t dy);
 bool usb_hid_send_digitizer_report(uint8_t switches, uint16_t x, uint16_t y);
 bool usb_hid_send_keyboard_report(uint8_t modifiers, const uint8_t keycodes[6]);
 bool usb_hid_send_consumer_control_report(uint16_t keycode);
+bool usb_hid_send_gamepad_report(uint16_t buttons, uint8_t hat);
 
 #define HID_KEY_UP_ARROW 0x52
 #define HID_KEY_DOWN_ARROW 0x51
@@ -200,6 +202,8 @@ static bool pointer_motion_locked;
 static bool pointer_prev_norm_valid;
 static uint16_t prev_consumer_keycode = 0;
 static bool home_b_combo_latched = false;
+static uint8_t prev_gamepad_hat = 0x08u;
+static uint16_t prev_gamepad_buttons = 0;
 static uint16_t inactivity_prev_buttons = 0;
 static uint16_t prev_raw_buttons = 0;
 static bool inactivity_prev_have_norm = false;
@@ -1044,15 +1048,55 @@ static void send_hid_keyboard_report(const wiimote_tracking_state_t *state) {
     uint8_t keycodes[6] = {0};
     uint8_t key_count = 0;
 
-    if (state->buttons & 0x0800u) add_hid_key(keycodes, &key_count, HID_KEY_UP_ARROW);
-    if (state->buttons & 0x0400u) add_hid_key(keycodes, &key_count, HID_KEY_DOWN_ARROW);
-    if (state->buttons & 0x0100u) add_hid_key(keycodes, &key_count, HID_KEY_LEFT_ARROW);
-    if (state->buttons & 0x0200u) add_hid_key(keycodes, &key_count, HID_KEY_RIGHT_ARROW);
-    if ((state->buttons & 0x0008u) && pointer_should_send_enter_with_a()) {
-        add_hid_key(keycodes, &key_count, HID_KEY_ENTER);
+    usb_hid_send_keyboard_report(0, keycodes);
+}
+
+static void send_hid_gamepad_report(const wiimote_tracking_state_t *state) {
+    if (!hid_connected || !usb_hid_gamepad_ready()) {
+        return;
     }
 
-    usb_hid_send_keyboard_report(0, keycodes);
+    uint16_t gamepad_buttons = 0;
+    if ((state->buttons & 0x0008u) && pointer_should_send_enter_with_a()) {
+        // Wii A -> Gamepad Button 1 only in no-IR navigation mode
+        gamepad_buttons |= 0x0001u;
+    }
+
+    uint8_t hat = 0x08u;
+    bool up = (state->buttons & 0x0800u) != 0;
+    bool down = (state->buttons & 0x0400u) != 0;
+    bool left = (state->buttons & 0x0100u) != 0;
+    bool right = (state->buttons & 0x0200u) != 0;
+
+    if (up && !down) {
+        if (left && !right) {
+            hat = 7;
+        } else if (right && !left) {
+            hat = 1;
+        } else {
+            hat = 0;
+        }
+    } else if (down && !up) {
+        if (left && !right) {
+            hat = 5;
+        } else if (right && !left) {
+            hat = 3;
+        } else {
+            hat = 4;
+        }
+    } else if (left && !right) {
+        hat = 6;
+    } else if (right && !left) {
+        hat = 2;
+    }
+
+    if (hat == prev_gamepad_hat && gamepad_buttons == prev_gamepad_buttons) {
+        return;
+    }
+
+    prev_gamepad_hat = hat;
+    prev_gamepad_buttons = gamepad_buttons;
+    usb_hid_send_gamepad_report(gamepad_buttons, hat);
 }
 
 static void send_hid_consumer_control_report(const wiimote_tracking_state_t *state) {
@@ -1108,6 +1152,7 @@ static void hid_report_timer_handler_state(const wiimote_tracking_state_t *state
     }
 
     if (hid_connected) {
+        send_hid_gamepad_report(state);
         send_hid_keyboard_report(state);
         send_hid_consumer_control_report(state);
         if (hid_output_mode == HID_MODE_POINTER) {
@@ -1569,6 +1614,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     reset_pointer_motion_state();
                     prev_consumer_keycode = 0;
                     home_b_combo_latched = false;
+                    prev_gamepad_hat = 0x08u;
+                    prev_gamepad_buttons = 0;
                     inactivity_prev_buttons = 0xFFFF; // force first reset
                     inactivity_prev_have_norm = false;
                     inactivity_prev_norm_x = 0;
@@ -1616,6 +1663,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     reset_pointer_motion_state();
                     prev_consumer_keycode = 0;
                     home_b_combo_latched = false;
+                    prev_gamepad_hat = 0x08u;
+                    prev_gamepad_buttons = 0;
                     inactivity_prev_have_norm = false;
                     inactivity_prev_norm_x = 0;
                     inactivity_prev_norm_y = 0;

@@ -20,7 +20,7 @@
 #endif
 
 #define TUD_RPI_RESET_DESC_LEN 9
-#define USBD_DESC_LEN (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_RPI_RESET_DESC_LEN + 4*TUD_HID_DESC_LEN)
+#define USBD_DESC_LEN (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_RPI_RESET_DESC_LEN + 5*TUD_HID_DESC_LEN)
 
 #if !PICO_STDIO_USB_DEVICE_SELF_POWERED
 #define USBD_CONFIGURATION_DESCRIPTOR_ATTRIBUTE TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP
@@ -36,7 +36,8 @@
 #define USBD_ITF_HID_DIGITIZER 4
 #define USBD_ITF_HID_KEYBOARD 5
 #define USBD_ITF_HID_CONSUMER_CONTROL 6
-#define USBD_ITF_MAX 7
+#define USBD_ITF_HID_GAMEPAD 7
+#define USBD_ITF_MAX 8
 
 #define USBD_CDC_EP_CMD 0x81
 #define USBD_CDC_EP_OUT 0x02
@@ -45,6 +46,7 @@
 #define USBD_HID_DIGITIZER_EP_IN 0x84
 #define USBD_HID_KEYBOARD_EP_IN 0x85
 #define USBD_HID_CONSUMER_CONTROL_EP_IN 0x86
+#define USBD_HID_GAMEPAD_EP_IN 0x87
 
 #define USBD_CDC_CMD_MAX_SIZE 8
 #define USBD_CDC_IN_OUT_MAX_SIZE 64
@@ -61,6 +63,7 @@
 #define USBD_STR_HID_DIGITIZER 0x07
 #define USBD_STR_HID_KEYBOARD 0x08
 #define USBD_STR_HID_CONSUMER_CONTROL 0x09
+#define USBD_STR_HID_GAMEPAD 0x0A
 
 #define TUD_RPI_RESET_DESCRIPTOR(_itfnum, _stridx) \
     9, TUSB_DESC_INTERFACE, _itfnum, 0, 0, TUSB_CLASS_VENDOR_SPECIFIC, RESET_INTERFACE_SUBCLASS, RESET_INTERFACE_PROTOCOL, _stridx
@@ -184,6 +187,45 @@ static const uint8_t hid_report_desc_consumer_control[] = {
     0xC0                         // End Collection
 };
 
+static const uint8_t hid_report_desc_gamepad[] = {
+        0x05, 0x01,                  // Usage Page (Generic Desktop)
+        0x09, 0x05,                  // Usage (Game Pad)
+        0xA1, 0x01,                  // Collection (Application)
+            0x85, 0x05,                // Report ID (5)
+            0x05, 0x09,                // Usage Page (Button)
+            0x19, 0x01,                // Usage Minimum (Button 1)
+            0x29, 0x10,                // Usage Maximum (Button 16)
+            0x15, 0x00,                // Logical Minimum (0)
+            0x25, 0x01,                // Logical Maximum (1)
+            0x75, 0x01,                // Report Size (1)
+            0x95, 0x10,                // Report Count (16)
+            0x81, 0x02,                // Input (Data,Var,Abs)
+            0x05, 0x01,                // Usage Page (Generic Desktop)
+            0x09, 0x39,                // Usage (Hat switch)
+            0x15, 0x00,                // Logical Minimum (0)
+            0x25, 0x07,                // Logical Maximum (7)
+            0x35, 0x00,                // Physical Minimum (0)
+            0x46, 0x3B, 0x01,          // Physical Maximum (315)
+            0x65, 0x14,                // Unit (Eng Rot: Degree)
+            0x75, 0x04,                // Report Size (4)
+            0x95, 0x01,                // Report Count (1)
+            0x81, 0x42,                // Input (Data,Var,Abs,Null)
+            0x65, 0x00,                // Unit (None)
+            0x75, 0x04,                // Report Size (4)
+            0x95, 0x01,                // Report Count (1)
+            0x81, 0x01,                // Input (Const,Array,Abs)
+            0x09, 0x30,                // Usage (X)
+            0x09, 0x31,                // Usage (Y)
+            0x09, 0x32,                // Usage (Z)
+            0x09, 0x35,                // Usage (Rz)
+            0x15, 0x81,                // Logical Minimum (-127)
+            0x25, 0x7F,                // Logical Maximum (127)
+            0x75, 0x08,                // Report Size (8)
+            0x95, 0x04,                // Report Count (4)
+            0x81, 0x02,                // Input (Data,Var,Abs)
+        0xC0                         // End Collection
+};
+
 static const uint8_t usbd_desc_cfg[USBD_DESC_LEN] = {
     TUD_CONFIG_DESCRIPTOR(
         1,
@@ -239,6 +281,15 @@ static const uint8_t usbd_desc_cfg[USBD_DESC_LEN] = {
         USBD_HID_CONSUMER_CONTROL_EP_IN,
         USBD_HID_EP_SIZE,
         USBD_HID_POLL_MS),
+
+    TUD_HID_DESCRIPTOR(
+        USBD_ITF_HID_GAMEPAD,
+        USBD_STR_HID_GAMEPAD,
+        HID_ITF_PROTOCOL_NONE,
+        sizeof(hid_report_desc_gamepad),
+        USBD_HID_GAMEPAD_EP_IN,
+        USBD_HID_EP_SIZE,
+        USBD_HID_POLL_MS),
 };
 
 static char usbd_serial_str[PICO_UNIQUE_BOARD_ID_SIZE_BYTES * 2 + 1];
@@ -253,6 +304,7 @@ static const char *const usbd_desc_str[] = {
     [USBD_STR_HID_DIGITIZER] = "HID Digitizer",
     [USBD_STR_HID_KEYBOARD] = "HID Keyboard",
     [USBD_STR_HID_CONSUMER_CONTROL] = "HID Consumer Control",
+    [USBD_STR_HID_GAMEPAD] = "HID Gamepad",
 };
 
 const uint8_t *tud_descriptor_device_cb(void) {
@@ -303,6 +355,8 @@ const uint8_t *tud_hid_descriptor_report_cb(uint8_t instance) {
         return hid_report_desc_keyboard;
     } else if (instance == 3) {
         return hid_report_desc_consumer_control;
+    } else if (instance == 4) {
+        return hid_report_desc_gamepad;
     }
     return NULL;
 }
@@ -384,4 +438,23 @@ bool usb_hid_send_consumer_control_report(uint16_t keycode) {
     report[1] = (uint8_t)((keycode >> 8) & 0xFF);
 
     return tud_hid_n_report(3, 4, report, sizeof(report));
+}
+
+bool usb_hid_gamepad_ready(void) {
+    return tud_hid_n_ready(4);
+}
+
+bool usb_hid_send_gamepad_report(uint16_t buttons, uint8_t hat) {
+    // 16 button bits + hat nibble + 4 analog axes (X,Y,Z,Rz)
+    uint8_t report[7] = {0};
+
+    report[0] = (uint8_t)(buttons & 0xFFu);
+    report[1] = (uint8_t)((buttons >> 8) & 0xFFu);
+    report[2] = (uint8_t)(hat & 0x0Fu);
+    report[3] = 0;
+    report[4] = 0;
+    report[5] = 0;
+    report[6] = 0;
+
+    return tud_hid_n_report(4, 5, report, sizeof(report));
 }
