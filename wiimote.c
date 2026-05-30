@@ -4,6 +4,8 @@
 #include "pico/cyw43_arch.h"
 #include "pico/stdlib.h"
 
+#include "hardware/flash.h"
+#include "hardware/regs/addressmap.h"
 #include "hardware/structs/ioqspi.h"
 #include "hardware/structs/sio.h"
 #include "hardware/sync.h"
@@ -16,6 +18,7 @@
 #define CONNECT_RETRY_MS 1500
 #define BUTTON_PRINT_PERIOD_MS 200
 #define BOOTSEL_POLL_PERIOD_MS 1000
+#define SYNC_MODE_TIMEOUT_MS 60000
 #define MAX_ATTRIBUTE_VALUE_SIZE 300
 #define WIIMOTE_IR_POINTS 4
 #define POINTER_GAIN_X 3.0f
@@ -27,6 +30,66 @@
 #define NO_IR_ENTER_THRESHOLD_FRAMES 5
 #define WIIMOTE_LED_RIGHTMOST_MASK 0x80
 #define BT_RESET_POWER_ON_DELAY_MS 600
+#define TARGET_ADDR_STORE_MAGIC 0x574D4143u
+#define TARGET_ADDR_STORE_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
+
+static const char *nintendo_addr_prefixes[] = {
+    "98:B6:E9",
+    "7C:BB:8A",
+    "40:D2:8A",
+    "CC:FB:65",
+    "B8:AE:6E",
+    "9C:E6:35",
+    "18:2A:7B",
+    "8C:CD:E8",
+    "34:AF:2C",
+    "40:F4:07",
+    "2C:10:C1",
+    "58:BD:A3",
+    "E0:0C:7F",
+    "A4:C0:E1",
+    "CC:9E:00",
+    "D8:6B:F7",
+    "A4:5C:27",
+    "78:A2:A0",
+    "8C:56:C5",
+    "E0:E7:51",
+    "E8:4E:CE",
+    "00:27:09",
+    "00:26:59",
+    "00:25:A0",
+    "00:24:F3",
+    "00:24:44",
+    "00:24:1E",
+    "00:23:31",
+    "00:23:CC",
+    "00:22:D7",
+    "00:22:AA",
+    "00:22:4C",
+    "00:21:BD",
+    "00:21:47",
+    "00:1F:C5",
+    "00:1F:32",
+    "00:1E:A9",
+    "00:1E:35",
+    "00:1D:BC",
+    "00:1C:BE",
+    "00:1B:EA",
+    "00:1B:7A",
+    "00:1A:E9",
+    "00:19:FD",
+    "00:19:1D",
+    "00:17:AB",
+    "00:16:56",
+    "00:09:BF"
+};
+
+typedef struct {
+    uint32_t magic;
+    uint8_t addr[6];
+    uint8_t reserved[2];
+    uint32_t checksum;
+} target_addr_store_t;
 
 typedef struct {
     bool valid;
@@ -77,6 +140,7 @@ static btstack_timer_source_t connect_retry_timer;
 static btstack_timer_source_t inactivity_timer;
 static btstack_timer_source_t reconnect_cooldown_timer;
 static btstack_timer_source_t bt_reset_timer;
+static btstack_timer_source_t sync_mode_timer;
 
 static uint8_t hid_descriptor_storage[MAX_ATTRIBUTE_VALUE_SIZE];
 
@@ -89,6 +153,7 @@ static bool inactivity_disconnect_requested;
 static bool passive_reconnect_mode;
 static bool bt_reset_in_progress;
 static bool bt_reset_waiting_for_power_on;
+static bool sync_mode_active;
 static wiimote_tracking_state_t wiimote_state;
 
 bool usb_hid_pointer_ready(void);
@@ -132,6 +197,72 @@ static uint16_t inactivity_prev_norm_x = 0;
 static uint16_t inactivity_prev_norm_y = 0;
 static uint8_t pointer_no_ir_frames = 0;
 static bool onboard_led_on = false;
+static bool bootsel_prev_pressed = false;
+
+static void set_onboard_led(bool on) {
+    if (onboard_led_on == on) {
+        return;
+    }
+    onboard_led_on = on;
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, on ? 1 : 0);
+}
+
+static uint32_t target_addr_checksum(const uint8_t addr[6]) {
+    uint32_t checksum = TARGET_ADDR_STORE_MAGIC;
+    for (int i = 0; i < 6; i++) {
+        checksum = (checksum << 5) ^ (checksum >> 2) ^ addr[i];
+    }
+    return checksum;
+}
+
+static bool load_persisted_target_addr(bd_addr_t addr_out) {
+    const uint8_t *flash_ptr = (const uint8_t *)(XIP_BASE + TARGET_ADDR_STORE_OFFSET);
+    const target_addr_store_t *stored = (const target_addr_store_t *)flash_ptr;
+
+    if (stored->magic != TARGET_ADDR_STORE_MAGIC) {
+        return false;
+    }
+    if (stored->checksum != target_addr_checksum(stored->addr)) {
+        return false;
+    }
+
+    memcpy(addr_out, stored->addr, sizeof(bd_addr_t));
+    return true;
+}
+
+static bool save_persisted_target_addr(const bd_addr_t addr) {
+    target_addr_store_t stored = {0};
+    uint8_t sector_buf[FLASH_SECTOR_SIZE];
+
+    memset(sector_buf, 0xFF, sizeof(sector_buf));
+    stored.magic = TARGET_ADDR_STORE_MAGIC;
+    memcpy(stored.addr, addr, sizeof(bd_addr_t));
+    stored.checksum = target_addr_checksum(stored.addr);
+    memcpy(sector_buf, &stored, sizeof(stored));
+
+    uint32_t flags = save_and_disable_interrupts();
+    flash_range_erase(TARGET_ADDR_STORE_OFFSET, FLASH_SECTOR_SIZE);
+    flash_range_program(TARGET_ADDR_STORE_OFFSET, sector_buf, FLASH_SECTOR_SIZE);
+    restore_interrupts(flags);
+
+    bd_addr_t verify_addr;
+    if (!load_persisted_target_addr(verify_addr)) {
+        return false;
+    }
+    return bd_addr_cmp(verify_addr, addr) == 0;
+}
+
+static bool addr_is_nintendo_prefix(const bd_addr_t addr) {
+    const char *addr_str = bd_addr_to_str(addr);
+    size_t prefix_count = sizeof(nintendo_addr_prefixes) / sizeof(nintendo_addr_prefixes[0]);
+    for (size_t i = 0; i < prefix_count; i++) {
+        const char *prefix = nintendo_addr_prefixes[i];
+        if (strncmp(addr_str, prefix, strlen(prefix)) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
 
 static void reset_pointer_motion_state(void) {
     pointer_had_tracking = false;
@@ -218,6 +349,53 @@ static const char *error_code_to_string(uint8_t status) {
 
 static void start_scan(void);
 
+static void sync_mode_timeout_timer_handler(btstack_timer_source_t *ts) {
+    (void)ts;
+
+    if (!sync_mode_active) {
+        return;
+    }
+
+    sync_mode_active = false;
+    set_onboard_led(false);
+    printf("Sync mode timeout after %d ms\n", SYNC_MODE_TIMEOUT_MS);
+
+    if (!hid_connected) {
+        start_scan();
+    }
+}
+
+static void enter_sync_mode(void) {
+    if (sync_mode_active) {
+        return;
+    }
+
+    sync_mode_active = true;
+    passive_reconnect_mode = false;
+    reconnect_cooldown_active = false;
+    inactivity_disconnect_requested = false;
+    pending_connect = false;
+
+    btstack_run_loop_remove_timer(&connect_retry_timer);
+    btstack_run_loop_remove_timer(&reconnect_cooldown_timer);
+    btstack_run_loop_remove_timer(&sync_mode_timer);
+
+    btstack_run_loop_set_timer(&sync_mode_timer, SYNC_MODE_TIMEOUT_MS);
+    btstack_run_loop_add_timer(&sync_mode_timer);
+
+    printf("Sync mode started (%d ms). Searching for Nintendo prefix %s\n",
+           SYNC_MODE_TIMEOUT_MS,
+            nintendo_addr_prefixes[0]);
+
+    if (hid_connected && hid_host_cid != 0) {
+        printf("Sync mode: disconnecting current Wii Remote\n");
+        hid_host_disconnect(hid_host_cid);
+        return;
+    }
+
+    start_scan();
+}
+
 static void request_bt_stack_reset(void) {
     if (bt_reset_in_progress) {
         return;
@@ -275,6 +453,15 @@ static void connect_retry_timer_handler(btstack_timer_source_t *ts) {
 
 static void start_scan(void) {
     if (bt_reset_in_progress) {
+        return;
+    }
+    if (sync_mode_active) {
+        if (pending_connect || hid_connected) {
+            return;
+        }
+         printf("Sync mode inquiry: checking %u prefix(es)\n",
+             (unsigned)(sizeof(nintendo_addr_prefixes) / sizeof(nintendo_addr_prefixes[0])));
+        gap_inquiry_start(INQUIRY_SECONDS);
         return;
     }
     if (reconnect_cooldown_active) {
@@ -1057,10 +1244,19 @@ static void bootsel_poll_timer_handler(btstack_timer_source_t *ts) {
     (void)ts;
 
     bool pressed = read_bootsel_button_pressed();
-    printf("BOOTSEL: %s\n", pressed ? "pressed" : "released");
+    if (pressed != bootsel_prev_pressed) {
+        printf("BOOTSEL: %s\n", pressed ? "pressed" : "released");
+        if (pressed) {
+            enter_sync_mode();
+        }
+        bootsel_prev_pressed = pressed;
+    }
 
-    onboard_led_on = !onboard_led_on;
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, onboard_led_on ? 1 : 0);
+    if (sync_mode_active) {
+        set_onboard_led(!onboard_led_on);
+    } else {
+        set_onboard_led(false);
+    }
 
     btstack_run_loop_set_timer(&bootsel_poll_timer, BOOTSEL_POLL_PERIOD_MS);
     btstack_run_loop_add_timer(&bootsel_poll_timer);
@@ -1108,6 +1304,37 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             bool has_rssi = gap_event_inquiry_result_get_rssi_available(packet);
             if (has_rssi) {
                 rssi = (int8_t)gap_event_inquiry_result_get_rssi(packet);
+            }
+
+            if (sync_mode_active) {
+                bool nintendo_prefix_match = addr_is_nintendo_prefix(addr);
+                printf("Sync discovery: %s  cod=0x%06lx",
+                       bd_addr_to_str(addr),
+                       (unsigned long)gap_event_inquiry_result_get_class_of_device(packet));
+                if (has_rssi) {
+                    printf("  rssi=%d", rssi);
+                }
+                printf("  name='%s'  nintendo_prefix=%s\n",
+                       name,
+                       nintendo_prefix_match ? "yes" : "no");
+
+                if (!nintendo_prefix_match) {
+                    break;
+                }
+
+                memcpy(wiimote_state.target_addr, addr, sizeof(bd_addr_t));
+                wiimote_state.target_addr_configured = true;
+
+                printf("Sync mode candidate found at %s\n", bd_addr_to_str(wiimote_state.target_addr));
+                gap_inquiry_stop();
+
+                uint8_t status = hid_host_connect(wiimote_state.target_addr, hid_host_report_mode, &hid_host_cid);
+                if (status == ERROR_CODE_SUCCESS) {
+                    pending_connect = true;
+                } else {
+                    printf("Sync connect attempt failed (0x%02x), continuing inquiry\n", status);
+                }
+                break;
             }
 
             printf("Inquiry: %s  cod=0x%06lx", bd_addr_to_str(addr),
@@ -1177,8 +1404,12 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                         hid_connected = false;
                         hid_host_cid = 0;
                         pending_connect = false;
-                        btstack_run_loop_set_timer(&connect_retry_timer, CONNECT_RETRY_MS);
-                        btstack_run_loop_add_timer(&connect_retry_timer);
+                        if (sync_mode_active) {
+                            start_scan();
+                        } else {
+                            btstack_run_loop_set_timer(&connect_retry_timer, CONNECT_RETRY_MS);
+                            btstack_run_loop_add_timer(&connect_retry_timer);
+                        }
                         break;
                     }
 
@@ -1187,6 +1418,22 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     pending_connect = false;
                     passive_reconnect_mode = false;
                     inactivity_disconnect_requested = false;
+
+                    bd_addr_t connected_addr;
+                    hid_subevent_connection_opened_get_bd_addr(packet, connected_addr);
+                    memcpy(wiimote_state.target_addr, connected_addr, sizeof(bd_addr_t));
+                    wiimote_state.target_addr_configured = true;
+
+                    if (sync_mode_active) {
+                        bool saved = save_persisted_target_addr(connected_addr);
+                        printf("Sync mode paired with %s (%s)\n",
+                               bd_addr_to_str(connected_addr),
+                               saved ? "saved" : "save failed");
+                        sync_mode_active = false;
+                        btstack_run_loop_remove_timer(&sync_mode_timer);
+                        set_onboard_led(false);
+                    }
+
                     wiimote_tracking_state_reset_session(&wiimote_state);
                     set_wiimote_rightmost_led();
                     reset_pointer_motion_state();
@@ -1285,15 +1532,19 @@ static void hid_host_setup(void) {
     btstack_run_loop_set_timer_handler(&connect_retry_timer, connect_retry_timer_handler);
     btstack_run_loop_set_timer_handler(&reconnect_cooldown_timer, reconnect_cooldown_timer_handler);
     btstack_run_loop_set_timer_handler(&bt_reset_timer, bt_reset_timer_handler);
+    btstack_run_loop_set_timer_handler(&sync_mode_timer, sync_mode_timeout_timer_handler);
     btstack_run_loop_set_timer_handler(&bootsel_poll_timer, bootsel_poll_timer_handler);
 }
 
 void wiimote_init(void) {
     wiimote_tracking_state_init(&wiimote_state);
-    sscanf_bd_addr("00:1E:35:40:63:9F", wiimote_state.target_addr);
-    wiimote_state.target_addr_configured = true;
-
-    printf("Using hard-coded target address: %s\n", "00:1E:35:40:63:9F");
+    if (load_persisted_target_addr(wiimote_state.target_addr)) {
+        wiimote_state.target_addr_configured = true;
+        printf("Loaded saved target address: %s\n", bd_addr_to_str(wiimote_state.target_addr));
+    } else {
+        wiimote_state.target_addr_configured = false;
+        printf("No saved target address; starting in discovery mode\n");
+    }
 
     hid_host_setup();
 
