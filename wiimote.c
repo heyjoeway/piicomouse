@@ -178,6 +178,7 @@ bool usb_hid_send_consumer_control_report(uint16_t keycode);
 
 #define HID_CONSUMER_AC_HOME 0x0223
 #define HID_CONSUMER_AC_BACK 0x0224
+#define HID_CONSUMER_TV_INPUT 0x00B5
 #define HID_CONSUMER_SLEEP 0x32
 #define HID_CONSUMER_VOLUME_UP 0xE9
 #define HID_CONSUMER_VOLUME_DOWN 0xEA
@@ -197,7 +198,8 @@ static uint16_t pointer_prev_norm_x;
 static uint16_t pointer_prev_norm_y;
 static bool pointer_motion_locked;
 static bool pointer_prev_norm_valid;
-static uint32_t prev_consumer_buttons = 0;
+static uint16_t prev_consumer_keycode = 0;
+static bool home_b_combo_latched = false;
 static uint16_t inactivity_prev_buttons = 0;
 static uint16_t prev_raw_buttons = 0;
 static bool inactivity_prev_have_norm = false;
@@ -271,7 +273,8 @@ static bool process_hid_sleep_signal(void) {
     }
 
     usb_hid_send_consumer_control_report(0);
-    prev_consumer_buttons = 0;
+    prev_consumer_keycode = 0;
+    home_b_combo_latched = false;
     hid_sleep_signal_stage = HID_SLEEP_SIGNAL_IDLE;
     printf("Sent HID Sleep press+release\n");
     return true;
@@ -1057,18 +1060,18 @@ static void send_hid_consumer_control_report(const wiimote_tracking_state_t *sta
         return;
     }
 
-    // Extract only the consumer control buttons
-    uint32_t consumer_buttons = state->buttons & (0x0001u | 0x0002u | 0x0010u | 0x0080u | 0x1000u);
-
-    // Only send if the button state changed
-    if (consumer_buttons == prev_consumer_buttons) {
-        return;
-    }
-    prev_consumer_buttons = consumer_buttons;
-
+    bool home_down = (state->buttons & 0x0080u) != 0;
+    bool b_down = (state->buttons & 0x0004u) != 0;
     uint16_t keycode = 0;
 
-    if (state->buttons & 0x0080u) {
+    if (!home_down) {
+        home_b_combo_latched = false;
+    }
+
+    if (home_down && b_down) {
+        home_b_combo_latched = true;
+        keycode = HID_CONSUMER_TV_INPUT;
+    } else if (home_down && !home_b_combo_latched) {
         keycode = HID_CONSUMER_AC_HOME;
     } else if (state->buttons & 0x0010u) {
         keycode = HID_CONSUMER_AC_BACK;
@@ -1079,6 +1082,12 @@ static void send_hid_consumer_control_report(const wiimote_tracking_state_t *sta
     } else if (state->buttons & 0x1000u) {
         keycode = HID_CONSUMER_MUTE;
     }
+
+    if (keycode == prev_consumer_keycode) {
+        return;
+    }
+
+    prev_consumer_keycode = keycode;
 
     usb_hid_send_consumer_control_report(keycode);
 }
@@ -1558,7 +1567,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     wiimote_tracking_state_reset_session(&wiimote_state);
                     set_wiimote_rightmost_led();
                     reset_pointer_motion_state();
-                    prev_consumer_buttons = 0;
+                    prev_consumer_keycode = 0;
+                    home_b_combo_latched = false;
                     inactivity_prev_buttons = 0xFFFF; // force first reset
                     inactivity_prev_have_norm = false;
                     inactivity_prev_norm_x = 0;
@@ -1604,7 +1614,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     btstack_run_loop_remove_timer(&connect_retry_timer);
                     wiimote_tracking_state_reset_session(&wiimote_state);
                     reset_pointer_motion_state();
-                    prev_consumer_buttons = 0;
+                    prev_consumer_keycode = 0;
+                    home_b_combo_latched = false;
                     inactivity_prev_have_norm = false;
                     inactivity_prev_norm_x = 0;
                     inactivity_prev_norm_y = 0;
