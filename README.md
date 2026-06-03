@@ -1,4 +1,8 @@
-This project was 100% vibe-coded. 
+<img
+    alt="'SLOP ADVISORY: ARTIFICIAL CONTENT' (This project was 99% vibe-coded.)"
+    src="./slopadvisory.png"
+    width="200"
+/>
 
 # Piicomouse
 
