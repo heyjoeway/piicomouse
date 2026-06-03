@@ -1,0 +1,71 @@
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      PICO_SDK_VERSION: "2.2.0"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ARM toolchain and build tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            ninja-build \
+            gcc-arm-none-eabi \
+            libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib \
+            build-essential \
+            python3
+
+      - name: Cache Pico SDK
+        id: cache-sdk
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/pico-sdk
+          key: pico-sdk-${{ env.PICO_SDK_VERSION }}
+
+      - name: Clone Pico SDK
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
+        run: |
+          git clone \
+            --branch $PICO_SDK_VERSION \
+            --recurse-submodules \
+            --depth 1 \
+            https://github.com/raspberrypi/pico-sdk.git \
+            ${{ github.workspace }}/pico-sdk
+
+      - name: Configure
+        run: |
+          mkdir -p build
+          cmake \
+            -G Ninja \
+            -B build \
+            -S . \
+            -DPICO_BOARD=pico2_w \
+            -DPICO_SDK_PATH=${{ github.workspace }}/pico-sdk \
+            -DCMAKE_BUILD_TYPE=Release
+        env:
+          PICO_SDK_PATH: ${{ github.workspace }}/pico-sdk
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Upload UF2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: piicomouse2-${{ github.sha }}
+          path: build/piicomouse2.uf2
+          if-no-files-found: error
+          retention-days: 90
