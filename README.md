@@ -19,7 +19,17 @@ Turns a Wii Remote into a airmouse-style remote using a Pi Pico W 2. HEAVILY WIP
 
 Because this project was primarily vibe-coded, there may be gaps in documentation and attribution. If you contributed to the project or recognize work that should be credited, *please reach out so we can acknowledge your contributions properly.*
 
-## Build and Flash
+## Quick Start
+
+1. Download the [latest release](https://github.com/heyjoeway/piicomouse/releases/latest).
+2. Put your Pico W 2 into bootloader mode by holding the BOOTSEL button while plugging it into your computer.
+3. Copy the downloaded UF2 file to the RPI-RP2 drive that appears.
+4. Once flashing is complete, hold the BOOTSEL button for 1 second to enter pairing mode for 60 seconds.
+5. Press the sync button on your Wii Remote.
+
+You'll know it's working if only the rightmost LED of the Wii Remote is lit.
+
+## Development
 
 [Follow the standard Getting Started guide for Raspberry Pi Pico C/C++ development to set up your environment.](https://www.raspberrypi.com/documentation/microcontrollers/c_sdk.html) Compile and flash as documented in section 4.1.
 
