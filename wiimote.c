@@ -105,6 +105,8 @@ typedef struct {
 typedef struct {
     bool have_buttons;
     uint16_t buttons;
+    bool status_flags_valid;
+    uint8_t status_flags;
     bool have_ir;
     bool have_center;
     uint16_t center_x;
@@ -1254,6 +1256,21 @@ static void inactivity_timer_handler(btstack_timer_source_t *ts) {
     }
 }
 
+static void apply_wiimote_buttons(wiimote_tracking_state_t *state, uint16_t raw_buttons) {
+    uint16_t new_buttons = raw_buttons & WIIMOTE_BUTTON_MASK;
+
+    if (raw_buttons != prev_raw_buttons) {
+        prev_raw_buttons = raw_buttons;
+    }
+
+    reset_inactivity_timer(new_buttons);
+
+    state->buttons = new_buttons;
+    state->have_buttons = true;
+    handle_ir_profile_hotkeys(state, state->buttons);
+    handle_hid_mode_hotkeys(state, state->buttons);
+}
+
 static void parse_wiimote_report(wiimote_tracking_state_t *state, const uint8_t *report, uint16_t report_len) {
     if (report_len < 4) {
         return;
@@ -1278,30 +1295,36 @@ static void parse_wiimote_report(wiimote_tracking_state_t *state, const uint8_t 
         printf("IR report mode active: 0x%02x\n", report_id);
     }
 
+    if (report_id == 0x20 && report_len >= 6) {
+        uint8_t status_flags = report[4];
+        bool extension_present = (report[4] & 0x02u) != 0;
+        bool ir_enabled = (report[4] & 0x08u) != 0;
+        bool status_changed = !state->status_flags_valid || state->status_flags != status_flags;
+
+        apply_wiimote_buttons(state, ((uint16_t)report[2] << 8) | report[3]);
+        state->status_flags = status_flags;
+        state->status_flags_valid = true;
+
+        if (status_changed) {
+            state->have_norm = false;
+            state->have_center = false;
+            printf("Status report: extension=%s ir=%s flags=0x%02x, renegotiating report mode\n",
+                   extension_present ? "yes" : "no",
+                   ir_enabled ? "on" : "off",
+                   status_flags);
+        }
+
+        if (status_changed && !state->ir_init_in_progress) {
+            request_wiimote_ir_report(state);
+        }
+        return;
+    }
+
     if (report_id < 0x30 || report_id > 0x3F) {
         return;
     }
 
-    uint16_t raw_buttons = ((uint16_t)report[2] << 8) | report[3];
-    uint16_t new_buttons = raw_buttons & WIIMOTE_BUTTON_MASK;
-
-    if (raw_buttons != prev_raw_buttons) {
-        uint16_t unknown_mask = (uint16_t)(raw_buttons & ~WIIMOTE_BUTTON_MASK);
-        // if (unknown_mask != 0) {
-        //     printf("Raw button flags changed: raw=0x%04x masked=0x%04x unknown=0x%04x\n",
-        //            raw_buttons,
-        //            new_buttons,
-        //            unknown_mask);
-        // }
-        prev_raw_buttons = raw_buttons;
-    }
-
-    reset_inactivity_timer(new_buttons);
-
-    state->buttons = new_buttons;
-    state->have_buttons = true;
-    handle_ir_profile_hotkeys(state, state->buttons);
-    handle_hid_mode_hotkeys(state, state->buttons);
+    apply_wiimote_buttons(state, ((uint16_t)report[2] << 8) | report[3]);
 
     if (report_id == 0x33 && report_len >= 19) {
         if (state->ir_debug_frames_remaining > 0) {
