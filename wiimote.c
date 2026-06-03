@@ -31,6 +31,7 @@ bool tud_mounted(void);
 #define WIIMOTE_BUTTON_MASK 0x1F9Fu
 #define INACTIVITY_IR_MOVE_THRESHOLD 12
 #define RECONNECT_COOLDOWN_MS 1000
+#define DISCONNECT_REASON_SETTLE_MS 300
 #define NO_IR_ENTER_THRESHOLD_FRAMES 5
 #define WIIMOTE_LED_RIGHTMOST_MASK 0x80
 #define BT_RESET_POWER_ON_DELAY_MS 600
@@ -161,6 +162,7 @@ static bool bt_reset_in_progress;
 static bool bt_reset_waiting_for_power_on;
 static bool sync_mode_active;
 static hci_con_handle_t wiimote_con_handle = HCI_CON_HANDLE_INVALID;
+static uint8_t wiimote_last_disconnect_reason = 0x00;
 static wiimote_tracking_state_t wiimote_state;
 
 bool usb_hid_pointer_ready(void);
@@ -188,6 +190,7 @@ bool usb_hid_send_gamepad_report(uint16_t buttons, uint8_t hat);
 #define HID_CONSUMER_VOLUME_DOWN 0xEA
 #define HID_CONSUMER_MUTE 0xE2
 
+#define WIIMOTE_DISCONNECT_REASON_REMOTE_USER_TERMINATED 0x13
 #define WIIMOTE_DISCONNECT_REASON_POWER_OFF 0x15
 
 typedef enum {
@@ -448,6 +451,11 @@ static const char *error_code_to_string(uint8_t status) {
 
 static void start_scan(void);
 
+static bool is_passive_disconnect_reason(uint8_t reason) {
+    return reason == WIIMOTE_DISCONNECT_REASON_POWER_OFF ||
+           reason == WIIMOTE_DISCONNECT_REASON_REMOTE_USER_TERMINATED;
+}
+
 static void sync_mode_timeout_timer_handler(btstack_timer_source_t *ts) {
     (void)ts;
 
@@ -545,6 +553,10 @@ static void reconnect_cooldown_timer_handler(btstack_timer_source_t *ts) {
 
 static void connect_retry_timer_handler(btstack_timer_source_t *ts) {
     (void)ts;
+    if (passive_reconnect_mode) {
+        printf("Reconnect retry skipped; passive wake mode active. Press any Wii Remote button to reconnect.\n");
+        return;
+    }
     if (!hid_connected) {
         start_scan();
     }
@@ -1565,9 +1577,24 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
 
             if (wiimote_con_handle != HCI_CON_HANDLE_INVALID && con_handle == wiimote_con_handle) {
+                wiimote_last_disconnect_reason = reason;
                 printf("Wii ACL disconnection reason: 0x%02x\n", reason);
                 if (reason == WIIMOTE_DISCONNECT_REASON_POWER_OFF) {
                     queue_hid_sleep_signal();
+                }
+
+                if (!inactivity_disconnect_requested && is_passive_disconnect_reason(reason)) {
+                    passive_reconnect_mode = true;
+                    btstack_run_loop_remove_timer(&connect_retry_timer);
+
+                    reconnect_cooldown_active = true;
+                    btstack_run_loop_remove_timer(&reconnect_cooldown_timer);
+                    btstack_run_loop_set_timer(&reconnect_cooldown_timer, RECONNECT_COOLDOWN_MS);
+                    btstack_run_loop_add_timer(&reconnect_cooldown_timer);
+
+                    printf("Disconnect reason 0x%02x -> passive wake mode guard for %d ms\n",
+                           reason,
+                           RECONNECT_COOLDOWN_MS);
                 }
                 wiimote_con_handle = HCI_CON_HANDLE_INVALID;
             }
@@ -1618,6 +1645,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     pending_connect = false;
                     passive_reconnect_mode = false;
                     inactivity_disconnect_requested = false;
+                    wiimote_last_disconnect_reason = 0x00;
 
                     request_usb_remote_wake_on_reconnect();
                     queue_hid_wake_nudge();
@@ -1703,10 +1731,21 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                         printf("Inactivity disconnect: waiting %d ms before reconnect\n", RECONNECT_COOLDOWN_MS);
                         btstack_run_loop_set_timer(&reconnect_cooldown_timer, RECONNECT_COOLDOWN_MS);
                         btstack_run_loop_add_timer(&reconnect_cooldown_timer);
+                    } else if (is_passive_disconnect_reason(wiimote_last_disconnect_reason)) {
+                        passive_reconnect_mode = true;
+                        reconnect_cooldown_active = true;
+                        btstack_run_loop_set_timer(&reconnect_cooldown_timer, RECONNECT_COOLDOWN_MS);
+                        btstack_run_loop_add_timer(&reconnect_cooldown_timer);
+                        printf("Passive disconnect reason 0x%02x: passive wake mode active. Press any Wii Remote button to reconnect.\n",
+                               wiimote_last_disconnect_reason);
                     } else {
                         passive_reconnect_mode = false;
-                        start_scan();
+                        btstack_run_loop_set_timer(&connect_retry_timer, DISCONNECT_REASON_SETTLE_MS);
+                        btstack_run_loop_add_timer(&connect_retry_timer);
+                        printf("Disconnect reason pending/non-passive; re-evaluating reconnect in %d ms\n",
+                               DISCONNECT_REASON_SETTLE_MS);
                     }
+                    wiimote_last_disconnect_reason = 0x00;
                     break;
 
                 default:
