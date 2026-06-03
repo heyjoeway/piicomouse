@@ -641,6 +641,8 @@ static void append_button(char *buffer, size_t len, bool *first, const char *nam
     *first = false;
 }
 
+static uint8_t wiimote_send_output_report(uint16_t report_id, const uint8_t *data, uint16_t len);
+
 static const char *buttons_to_string(uint16_t buttons) {
     static char text[96];
     bool first = true;
@@ -679,11 +681,14 @@ static void send_wiimote_write_memory(uint32_t address, const uint8_t *data, uin
     payload[4] = len;
     memcpy(&payload[5], data, len);
 
-    hid_host_send_set_report(hid_host_cid, HID_REPORT_TYPE_OUTPUT, 0x16, payload, (uint16_t)(len + 5));
+    (void)wiimote_send_output_report(0x16, payload, (uint16_t)(len + 5));
 }
 
 static uint8_t wiimote_send_output_report(uint16_t report_id, const uint8_t *data, uint16_t len) {
-    uint8_t status = hid_host_send_set_report(hid_host_cid, HID_REPORT_TYPE_OUTPUT, report_id, data, len);
+    uint8_t status = hid_host_send_report(hid_host_cid, report_id, data, (uint8_t)len);
+    if (status == ERROR_CODE_UNKNOWN_CONNECTION_IDENTIFIER || status == ERROR_CODE_COMMAND_DISALLOWED) {
+        status = hid_host_send_set_report(hid_host_cid, HID_REPORT_TYPE_OUTPUT, report_id, data, (uint8_t)len);
+    }
     if (status != ERROR_CODE_SUCCESS && status != ERROR_CODE_COMMAND_DISALLOWED) {
         printf("Output report 0x%02x send failed (0x%02x)\n", report_id, status);
     }
