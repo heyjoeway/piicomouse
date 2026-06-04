@@ -12,6 +12,7 @@
 
 #include "btstack_config.h"
 #include "btstack.h"
+#include "hid.h"
 #include "wiimote.h"
 
 bool tud_suspended(void);
@@ -24,19 +25,17 @@ bool tud_mounted(void);
 #define BOOTSEL_POLL_PERIOD_MS 1000
 #define SYNC_MODE_TIMEOUT_MS 60000
 #define MAX_ATTRIBUTE_VALUE_SIZE 300
-#define WIIMOTE_IR_POINTS 4
-#define POINTER_GAIN_X 3.0f
-#define POINTER_GAIN_Y 1.25f
 #define INACTIVITY_TIMEOUT_MS 300000
 #define WIIMOTE_BUTTON_MASK 0x1F9Fu
 #define INACTIVITY_IR_MOVE_THRESHOLD 12
 #define RECONNECT_COOLDOWN_MS 1000
 #define DISCONNECT_REASON_SETTLE_MS 300
-#define NO_IR_ENTER_THRESHOLD_FRAMES 5
 #define WIIMOTE_LED_RIGHTMOST_MASK 0x80
 #define BT_RESET_POWER_ON_DELAY_MS 600
 #define TARGET_ADDR_STORE_MAGIC 0x574D4143u
 #define TARGET_ADDR_STORE_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
+#define WIIMOTE_DISCONNECT_REASON_REMOTE_USER_TERMINATED 0x13
+#define WIIMOTE_DISCONNECT_REASON_POWER_OFF 0x15
 
 static const char *nintendo_addr_prefixes[] = {
     "98:B6:E9",
@@ -96,47 +95,6 @@ typedef struct {
     uint32_t checksum;
 } target_addr_store_t;
 
-typedef struct {
-    bool valid;
-    uint16_t x;
-    uint16_t y;
-    uint8_t size;
-} wiimote_ir_point_t;
-
-typedef struct {
-    bool have_buttons;
-    uint16_t buttons;
-    bool status_flags_valid;
-    uint8_t status_flags;
-    bool have_ir;
-    bool have_center;
-    uint16_t center_x;
-    uint16_t center_y;
-    bool have_norm;
-    uint16_t norm_x;
-    uint16_t norm_y;
-    wiimote_ir_point_t points[WIIMOTE_IR_POINTS];
-    bool seen_report_id[256];
-    bool ir_init_in_progress;
-    uint8_t ir_init_step;
-    uint8_t ir_debug_frames_remaining;
-    bool ir_report_mode_active;
-    uint8_t ir_mode_index;
-    uint8_t ir_mode_retry_count;
-    uint8_t ir_sensitivity_index;
-    int16_t ir_last_half_dx;
-    int16_t ir_last_half_dy;
-    uint16_t ir_last_center_x;
-    uint16_t ir_last_center_y;
-    uint8_t ir_dropout_frames;
-    bool ir_have_spread;
-    uint16_t previous_buttons;
-    uint16_t previous_buttons_hid_mode;
-    bd_addr_t target_addr;
-    bool target_addr_configured;
-    bool wii_pin_use_reversed;
-} wiimote_tracking_state_t;
-
 static const char *wii_name_prefix = "Nintendo RVL-CNT-01";
 
 static btstack_packet_callback_registration_t hci_event_callback_registration;
@@ -148,12 +106,10 @@ static btstack_timer_source_t inactivity_timer;
 static btstack_timer_source_t reconnect_cooldown_timer;
 static btstack_timer_source_t bt_reset_timer;
 static btstack_timer_source_t sync_mode_timer;
-
 static uint8_t hid_descriptor_storage[MAX_ATTRIBUTE_VALUE_SIZE];
 
 static hid_protocol_mode_t hid_host_report_mode = HID_PROTOCOL_MODE_REPORT;
 static uint16_t hid_host_cid;
-static bool hid_connected;
 static bool pending_connect;
 static bool reconnect_cooldown_active;
 static bool inactivity_disconnect_requested;
@@ -164,75 +120,13 @@ static bool sync_mode_active;
 static hci_con_handle_t wiimote_con_handle = HCI_CON_HANDLE_INVALID;
 static uint8_t wiimote_last_disconnect_reason = 0x00;
 static wiimote_tracking_state_t wiimote_state;
-
-bool usb_hid_pointer_ready(void);
-bool usb_hid_digitizer_ready(void);
-bool usb_hid_keyboard_ready(void);
-bool usb_hid_consumer_control_ready(void);
-bool usb_hid_gamepad_ready(void);
-bool usb_hid_send_pointer_report(uint8_t buttons, int8_t dx, int8_t dy);
-bool usb_hid_send_digitizer_report(uint8_t switches, uint16_t x, uint16_t y);
-bool usb_hid_send_keyboard_report(uint8_t modifiers, const uint8_t keycodes[6]);
-bool usb_hid_send_consumer_control_report(uint16_t keycode);
-bool usb_hid_send_gamepad_report(uint16_t buttons, uint8_t hat);
-
-#define HID_KEY_UP_ARROW 0x52
-#define HID_KEY_DOWN_ARROW 0x51
-#define HID_KEY_LEFT_ARROW 0x50
-#define HID_KEY_RIGHT_ARROW 0x4F
-#define HID_KEY_ENTER 0x28
-
-#define HID_CONSUMER_AC_HOME 0x0223
-#define HID_CONSUMER_AC_BACK 0x0224
-#define HID_CONSUMER_TV_INPUT 0x00B5
-#define HID_CONSUMER_SLEEP 0x32
-#define HID_CONSUMER_VOLUME_UP 0xE9
-#define HID_CONSUMER_VOLUME_DOWN 0xEA
-#define HID_CONSUMER_MUTE 0xE2
-
-#define WIIMOTE_DISCONNECT_REASON_REMOTE_USER_TERMINATED 0x13
-#define WIIMOTE_DISCONNECT_REASON_POWER_OFF 0x15
-
-typedef enum {
-    HID_MODE_POINTER = 0,
-    HID_MODE_DIGITIZER = 1,
-} hid_output_mode_t;
-
-static hid_output_mode_t hid_output_mode = HID_MODE_POINTER;
-static btstack_timer_source_t hid_report_timer;
-static bool pointer_had_tracking;
-static uint16_t pointer_prev_norm_x;
-static uint16_t pointer_prev_norm_y;
-static bool pointer_motion_locked;
-static bool pointer_prev_norm_valid;
-static uint16_t prev_consumer_keycode = 0;
-static bool home_b_combo_latched = false;
-static uint8_t prev_gamepad_hat = 0x08u;
-static uint16_t prev_gamepad_buttons = 0;
 static uint16_t inactivity_prev_buttons = 0;
 static uint16_t prev_raw_buttons = 0;
 static bool inactivity_prev_have_norm = false;
 static uint16_t inactivity_prev_norm_x = 0;
 static uint16_t inactivity_prev_norm_y = 0;
-static uint8_t pointer_no_ir_frames = 0;
 static bool onboard_led_on = false;
 static bool bootsel_prev_pressed = false;
-
-typedef enum {
-    HID_SLEEP_SIGNAL_IDLE = 0,
-    HID_SLEEP_SIGNAL_PRESS_PENDING,
-    HID_SLEEP_SIGNAL_RELEASE_PENDING,
-} hid_sleep_signal_stage_t;
-
-static hid_sleep_signal_stage_t hid_sleep_signal_stage = HID_SLEEP_SIGNAL_IDLE;
-
-typedef enum {
-    HID_WAKE_NUDGE_IDLE = 0,
-    HID_WAKE_NUDGE_POSITIVE_PENDING,
-    HID_WAKE_NUDGE_NEGATIVE_PENDING,
-} hid_wake_nudge_stage_t;
-
-static hid_wake_nudge_stage_t hid_wake_nudge_stage = HID_WAKE_NUDGE_IDLE;
 
 static void set_onboard_led(bool on) {
     if (onboard_led_on == on) {
@@ -240,73 +134,6 @@ static void set_onboard_led(bool on) {
     }
     onboard_led_on = on;
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, on ? 1 : 0);
-}
-
-static void request_usb_remote_wake_on_reconnect(void) {
-    if (!tud_mounted()) {
-        printf("USB remote wake on reconnect: skipped (not mounted)\n");
-        return;
-    }
-
-    if (!tud_suspended()) {
-        printf("USB remote wake on reconnect: skipped (host not suspended)\n");
-        return;
-    }
-
-    bool requested = tud_remote_wakeup();
-    printf("USB remote wake on reconnect: %s\n", requested ? "requested" : "not allowed");
-}
-
-static void queue_hid_sleep_signal(void) {
-    hid_sleep_signal_stage = HID_SLEEP_SIGNAL_PRESS_PENDING;
-    printf("Queued HID Sleep signal (disconnect reason 0x%02x)\n", WIIMOTE_DISCONNECT_REASON_POWER_OFF);
-}
-
-static void queue_hid_wake_nudge(void) {
-    hid_wake_nudge_stage = HID_WAKE_NUDGE_POSITIVE_PENDING;
-    printf("Queued HID wake nudge\n");
-}
-
-static bool process_hid_sleep_signal(void) {
-    if (hid_sleep_signal_stage == HID_SLEEP_SIGNAL_IDLE) {
-        return false;
-    }
-    if (!usb_hid_consumer_control_ready()) {
-        return true;
-    }
-
-    if (hid_sleep_signal_stage == HID_SLEEP_SIGNAL_PRESS_PENDING) {
-        usb_hid_send_consumer_control_report(HID_CONSUMER_SLEEP);
-        hid_sleep_signal_stage = HID_SLEEP_SIGNAL_RELEASE_PENDING;
-        return true;
-    }
-
-    usb_hid_send_consumer_control_report(0);
-    prev_consumer_keycode = 0;
-    home_b_combo_latched = false;
-    hid_sleep_signal_stage = HID_SLEEP_SIGNAL_IDLE;
-    printf("Sent HID Sleep press+release\n");
-    return true;
-}
-
-static bool process_hid_wake_nudge(void) {
-    if (hid_wake_nudge_stage == HID_WAKE_NUDGE_IDLE) {
-        return false;
-    }
-    if (!hid_connected || !usb_hid_pointer_ready()) {
-        return true;
-    }
-
-    if (hid_wake_nudge_stage == HID_WAKE_NUDGE_POSITIVE_PENDING) {
-        usb_hid_send_pointer_report(0, 1, 0);
-        hid_wake_nudge_stage = HID_WAKE_NUDGE_NEGATIVE_PENDING;
-        return true;
-    }
-
-    usb_hid_send_pointer_report(0, -1, 0);
-    hid_wake_nudge_stage = HID_WAKE_NUDGE_IDLE;
-    printf("Sent HID wake nudge\n");
-    return true;
 }
 
 static uint32_t target_addr_checksum(const uint8_t addr[6]) {
@@ -364,19 +191,6 @@ static bool addr_is_nintendo_prefix(const bd_addr_t addr) {
         }
     }
     return false;
-}
-
-static void reset_pointer_motion_state(void) {
-    pointer_had_tracking = false;
-    pointer_prev_norm_x = 0;
-    pointer_prev_norm_y = 0;
-    pointer_motion_locked = false;
-    pointer_prev_norm_valid = false;
-    pointer_no_ir_frames = 0;
-}
-
-static bool pointer_should_send_enter_with_a(void) {
-    return (hid_output_mode == HID_MODE_POINTER) && (pointer_no_ir_frames >= NO_IR_ENTER_THRESHOLD_FRAMES);
 }
 
 enum {
@@ -467,7 +281,7 @@ static void sync_mode_timeout_timer_handler(btstack_timer_source_t *ts) {
     set_onboard_led(false);
     printf("Sync mode timeout after %d ms\n", SYNC_MODE_TIMEOUT_MS);
 
-    if (!hid_connected) {
+    if (!hid_is_connected()) {
         start_scan();
     }
 }
@@ -494,7 +308,7 @@ static void enter_sync_mode(void) {
            SYNC_MODE_TIMEOUT_MS,
             nintendo_addr_prefixes[0]);
 
-    if (hid_connected && hid_host_cid != 0) {
+    if (hid_is_connected() && hid_host_cid != 0) {
         printf("Sync mode: disconnecting current Wii Remote\n");
         hid_host_disconnect(hid_host_cid);
         return;
@@ -557,7 +371,7 @@ static void connect_retry_timer_handler(btstack_timer_source_t *ts) {
         printf("Reconnect retry skipped; passive wake mode active. Press any Wii Remote button to reconnect.\n");
         return;
     }
-    if (!hid_connected) {
+    if (!hid_is_connected()) {
         start_scan();
     }
 }
@@ -567,7 +381,7 @@ static void start_scan(void) {
         return;
     }
     if (sync_mode_active) {
-        if (pending_connect || hid_connected) {
+        if (pending_connect || hid_is_connected()) {
             return;
         }
          printf("Sync mode inquiry: checking %u prefix(es)\n",
@@ -581,7 +395,7 @@ static void start_scan(void) {
     if (passive_reconnect_mode) {
         return;
     }
-    if (pending_connect || hid_connected) {
+    if (pending_connect || hid_is_connected()) {
         return;
     }
     if (wiimote_state.target_addr_configured) {
@@ -754,7 +568,7 @@ static void request_wiimote_ir_report(wiimote_tracking_state_t *state) {
 static void wiimote_ir_init_timer_handler_state(wiimote_tracking_state_t *state, btstack_timer_source_t *ts) {
     (void)ts;
 
-    if (!hid_connected || !state->ir_init_in_progress) {
+    if (!hid_is_connected() || !state->ir_init_in_progress) {
         return;
     }
 
@@ -964,13 +778,13 @@ static void handle_ir_profile_hotkeys(wiimote_tracking_state_t *state, uint16_t 
 
     if ((changed & 0x0800u) && (buttons & 0x0800u)) {
         select_ir_sensitivity_profile(state, (uint8_t)(state->ir_sensitivity_index + 1));
-        if (hid_connected) {
+        if (hid_is_connected()) {
             request_wiimote_ir_report(state);
         }
     } else if ((changed & 0x0400u) && (buttons & 0x0400u)) {
         const uint8_t profile_count = (uint8_t)(sizeof(wiimote_ir_profiles) / sizeof(wiimote_ir_profiles[0]));
         select_ir_sensitivity_profile(state, (uint8_t)((state->ir_sensitivity_index + profile_count - 1) % profile_count));
-        if (hid_connected) {
+        if (hid_is_connected()) {
             request_wiimote_ir_report(state);
         }
     }
@@ -978,243 +792,8 @@ static void handle_ir_profile_hotkeys(wiimote_tracking_state_t *state, uint16_t 
     state->previous_buttons = buttons;
 }
 
-static void send_hid_pointer_report(const wiimote_tracking_state_t *state) {
-    if (!hid_connected || !usb_hid_pointer_ready()) {
-        return;
-    }
-
-    uint8_t buttons = 0;
-    if ((state->buttons & 0x0008u) && !pointer_should_send_enter_with_a()) buttons |= 0x01;
-
-    bool movement_lock_requested = (buttons != 0) && ((state->buttons & 0x0004u) == 0);
-    int8_t dx = 0;
-    int8_t dy = 0;
-
-    if (!state->have_norm) {
-        if (pointer_had_tracking) {
-            usb_hid_send_pointer_report(0, 0, 0);
-            pointer_had_tracking = false;
-            pointer_prev_norm_valid = false;
-        }
-        return;
-    }
-
-    if (!pointer_prev_norm_valid) {
-        pointer_prev_norm_x = state->norm_x;
-        pointer_prev_norm_y = state->norm_y;
-        pointer_prev_norm_valid = true;
-        pointer_had_tracking = true;
-        usb_hid_send_pointer_report(buttons, 0, 0);
-        return;
-    }
-
-    int32_t delta_x = (int32_t)state->norm_x - (int32_t)pointer_prev_norm_x;
-    int32_t delta_y = (int32_t)state->norm_y - (int32_t)pointer_prev_norm_y;
-
-    pointer_prev_norm_x = state->norm_x;
-    pointer_prev_norm_y = state->norm_y;
-    pointer_had_tracking = true;
-
-    if (movement_lock_requested && !pointer_motion_locked) {
-        pointer_motion_locked = true;
-    } else if (!movement_lock_requested) {
-        pointer_motion_locked = false;
-    }
-
-    if (pointer_motion_locked) {
-        usb_hid_send_pointer_report(buttons, 0, 0);
-        return;
-    }
-
-    delta_x = -delta_x * POINTER_GAIN_X;
-    delta_y = delta_y * POINTER_GAIN_Y;
-
-    if (delta_x < -127) delta_x = -127;
-    if (delta_x > 127) delta_x = 127;
-    if (delta_y < -127) delta_y = -127;
-    if (delta_y > 127) delta_y = 127;
-
-    usb_hid_send_pointer_report(buttons, (int8_t)delta_x, (int8_t)delta_y);
-}
-
-static void send_hid_digitizer_report(const wiimote_tracking_state_t *state) {
-    if (!hid_connected || !usb_hid_digitizer_ready()) {
-        return;
-    }
-
-    uint8_t switches = 0;
-    if (state->buttons & 0x0008) switches |= 0x01;
-    if (state->buttons & 0x0010) switches |= 0x02;
-
-    uint16_t x = state->have_norm ? state->norm_x : 500;
-    uint16_t y = state->have_norm ? state->norm_y : 500;
-
-    usb_hid_send_digitizer_report(switches, x, y);
-}
-
-static void add_hid_key(uint8_t keycodes[6], uint8_t *count, uint8_t keycode) {
-    if (*count < 6) {
-        keycodes[*count] = keycode;
-        (*count)++;
-    }
-}
-
-static void send_hid_keyboard_report(const wiimote_tracking_state_t *state) {
-    if (!hid_connected || !usb_hid_keyboard_ready()) {
-        return;
-    }
-
-    uint8_t keycodes[6] = {0};
-    uint8_t key_count = 0;
-
-    usb_hid_send_keyboard_report(0, keycodes);
-}
-
-static void send_hid_gamepad_report(const wiimote_tracking_state_t *state) {
-    if (!hid_connected || !usb_hid_gamepad_ready()) {
-        return;
-    }
-
-    uint16_t gamepad_buttons = 0;
-    if ((state->buttons & 0x0008u) && pointer_should_send_enter_with_a()) {
-        // Wii A -> Gamepad Button 1 only in no-IR navigation mode
-        gamepad_buttons |= 0x0001u;
-    }
-
-    uint8_t hat = 0x08u;
-    bool up = (state->buttons & 0x0800u) != 0;
-    bool down = (state->buttons & 0x0400u) != 0;
-    bool left = (state->buttons & 0x0100u) != 0;
-    bool right = (state->buttons & 0x0200u) != 0;
-
-    if (up && !down) {
-        if (left && !right) {
-            hat = 7;
-        } else if (right && !left) {
-            hat = 1;
-        } else {
-            hat = 0;
-        }
-    } else if (down && !up) {
-        if (left && !right) {
-            hat = 5;
-        } else if (right && !left) {
-            hat = 3;
-        } else {
-            hat = 4;
-        }
-    } else if (left && !right) {
-        hat = 6;
-    } else if (right && !left) {
-        hat = 2;
-    }
-
-    if (hat == prev_gamepad_hat && gamepad_buttons == prev_gamepad_buttons) {
-        return;
-    }
-
-    prev_gamepad_hat = hat;
-    prev_gamepad_buttons = gamepad_buttons;
-    usb_hid_send_gamepad_report(gamepad_buttons, hat);
-}
-
-static void send_hid_consumer_control_report(const wiimote_tracking_state_t *state) {
-    if (!hid_connected || !usb_hid_consumer_control_ready()) {
-        return;
-    }
-
-    bool home_down = (state->buttons & 0x0080u) != 0;
-    bool b_down = (state->buttons & 0x0004u) != 0;
-    uint16_t keycode = 0;
-
-    if (!home_down) {
-        home_b_combo_latched = false;
-    }
-
-    if (home_down && b_down) {
-        home_b_combo_latched = true;
-        keycode = HID_CONSUMER_TV_INPUT;
-    } else if (home_down && !home_b_combo_latched) {
-        keycode = HID_CONSUMER_AC_HOME;
-    } else if (state->buttons & 0x0010u) {
-        keycode = HID_CONSUMER_AC_BACK;
-    } else if (state->buttons & 0x0002u) {
-        keycode = HID_CONSUMER_VOLUME_UP;
-    } else if (state->buttons & 0x0001u) {
-        keycode = HID_CONSUMER_VOLUME_DOWN;
-    } else if (state->buttons & 0x1000u) {
-        keycode = HID_CONSUMER_MUTE;
-    }
-
-    if (keycode == prev_consumer_keycode) {
-        return;
-    }
-
-    prev_consumer_keycode = keycode;
-
-    usb_hid_send_consumer_control_report(keycode);
-}
-
-static void hid_report_timer_handler_state(const wiimote_tracking_state_t *state, btstack_timer_source_t *ts) {
-    (void)ts;
-
-    if (process_hid_sleep_signal()) {
-        btstack_run_loop_set_timer(&hid_report_timer, 10);
-        btstack_run_loop_add_timer(&hid_report_timer);
-        return;
-    }
-
-    if (process_hid_wake_nudge()) {
-        btstack_run_loop_set_timer(&hid_report_timer, 10);
-        btstack_run_loop_add_timer(&hid_report_timer);
-        return;
-    }
-
-    if (hid_connected) {
-        send_hid_gamepad_report(state);
-        send_hid_keyboard_report(state);
-        send_hid_consumer_control_report(state);
-        if (hid_output_mode == HID_MODE_POINTER) {
-            send_hid_pointer_report(state);
-        } else if (hid_output_mode == HID_MODE_DIGITIZER) {
-            send_hid_digitizer_report(state);
-        }
-    }
-
-    btstack_run_loop_set_timer(&hid_report_timer, 10);
-    btstack_run_loop_add_timer(&hid_report_timer);
-}
-
-static void hid_report_timer_handler(btstack_timer_source_t *ts) {
-    hid_report_timer_handler_state(&wiimote_state, ts);
-}
-
-static void handle_hid_mode_hotkeys(wiimote_tracking_state_t *state, uint16_t buttons) {
-    uint16_t changed = buttons ^ state->previous_buttons_hid_mode;
-    bool b_down = (buttons & 0x0004u) != 0;
-
-    if (!b_down) {
-        state->previous_buttons_hid_mode = buttons;
-        return;
-    }
-
-    if ((changed & 0x0002u) && (buttons & 0x0002u)) {
-        if (hid_output_mode != HID_MODE_POINTER) {
-            hid_output_mode = HID_MODE_POINTER;
-            printf("Switched to HID Pointer mode\n");
-        }
-    } else if ((changed & 0x0001u) && (buttons & 0x0001u)) {
-        if (hid_output_mode != HID_MODE_DIGITIZER) {
-            hid_output_mode = HID_MODE_DIGITIZER;
-            printf("Switched to HID Digitizer mode\n");
-        }
-    }
-
-    state->previous_buttons_hid_mode = buttons;
-}
-
 static void reset_inactivity_timer(uint16_t buttons) {
-    if (!hid_connected) return;
+    if (!hid_is_connected()) return;
     if (buttons == inactivity_prev_buttons) return;
     printf("Inactivity timer reset (buttons 0x%04x -> 0x%04x)\n", inactivity_prev_buttons, buttons);
     inactivity_prev_buttons = buttons;
@@ -1224,7 +803,7 @@ static void reset_inactivity_timer(uint16_t buttons) {
 }
 
 static void reset_inactivity_timer_on_ir_activity(const wiimote_tracking_state_t *state) {
-    if (!hid_connected) {
+    if (!hid_is_connected()) {
         return;
     }
 
@@ -1265,7 +844,7 @@ static void reset_inactivity_timer_on_ir_activity(const wiimote_tracking_state_t
 
 static void inactivity_timer_handler(btstack_timer_source_t *ts) {
     (void)ts;
-    if (hid_connected) {
+    if (hid_is_connected()) {
         printf("Inactivity timeout (%d ms): disconnecting and entering passive wake mode\n", INACTIVITY_TIMEOUT_MS);
         inactivity_disconnect_requested = true;
         passive_reconnect_mode = true;
@@ -1285,7 +864,7 @@ static void apply_wiimote_buttons(wiimote_tracking_state_t *state, uint16_t raw_
     state->buttons = new_buttons;
     state->have_buttons = true;
     handle_ir_profile_hotkeys(state, state->buttons);
-    handle_hid_mode_hotkeys(state, state->buttons);
+    hid_handle_mode_hotkeys(state, state->buttons);
 }
 
 static void parse_wiimote_report(wiimote_tracking_state_t *state, const uint8_t *report, uint16_t report_len) {
@@ -1356,25 +935,16 @@ static void parse_wiimote_report(wiimote_tracking_state_t *state, const uint8_t 
         reset_inactivity_timer_on_ir_activity(state);
     }
 
-    if (hid_output_mode == HID_MODE_POINTER) {
-        if (state->have_norm) {
-            pointer_no_ir_frames = 0;
-        } else if (pointer_no_ir_frames < 0xFFu) {
-            pointer_no_ir_frames++;
-        }
-    } else {
-        pointer_no_ir_frames = 0;
-    }
 }
 
 static void button_print_timer_handler_state(const wiimote_tracking_state_t *state, btstack_timer_source_t *ts) {
     (void)ts;
 
-    if (hid_connected && state->have_buttons) {
+    if (hid_is_connected() && state->have_buttons) {
         printf("Buttons: %s\n", buttons_to_string(state->buttons));
     }
 
-    if (hid_connected && state->have_ir) {
+    if (hid_is_connected() && state->have_ir) {
         bool printed_any = false;
         printf("IR:");
         for (int i = 0; i < WIIMOTE_IR_POINTS; i++) {
@@ -1477,7 +1047,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             break;
 
         case GAP_EVENT_INQUIRY_RESULT: {
-            if (hid_connected || pending_connect) {
+            if (hid_is_connected() || pending_connect) {
                 break;
             }
 
@@ -1557,7 +1127,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         }
 
         case GAP_EVENT_INQUIRY_COMPLETE:
-            if (!hid_connected) {
+            if (!hid_is_connected()) {
                 start_scan();
             }
             break;
@@ -1580,7 +1150,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 wiimote_last_disconnect_reason = reason;
                 printf("Wii ACL disconnection reason: 0x%02x\n", reason);
                 if (reason == WIIMOTE_DISCONNECT_REASON_POWER_OFF) {
-                    queue_hid_sleep_signal();
+                    hid_queue_sleep_signal();
                 }
 
                 if (!inactivity_disconnect_requested && is_passive_disconnect_reason(reason)) {
@@ -1626,7 +1196,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                             printf("Security refusal: next attempt will use %s local BD_ADDR PIN byte order\n",
                                    wiimote_state.wii_pin_use_reversed ? "reversed" : "forward");
                         }
-                        hid_connected = false;
+                        hid_set_connected(false);
                         hid_host_cid = 0;
                         wiimote_con_handle = HCI_CON_HANDLE_INVALID;
                         pending_connect = false;
@@ -1641,14 +1211,15 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 
                     hid_host_cid = hid_subevent_connection_opened_get_hid_cid(packet);
                     wiimote_con_handle = hid_subevent_connection_opened_get_con_handle(packet);
-                    hid_connected = true;
+                    hid_set_connected(true);
                     pending_connect = false;
                     passive_reconnect_mode = false;
                     inactivity_disconnect_requested = false;
                     wiimote_last_disconnect_reason = 0x00;
 
-                    request_usb_remote_wake_on_reconnect();
-                    queue_hid_wake_nudge();
+                    hid_reset_output_state();
+                    hid_request_usb_remote_wake_on_reconnect();
+                    hid_queue_wake_nudge();
 
                     bd_addr_t connected_addr;
                     hid_subevent_connection_opened_get_bd_addr(packet, connected_addr);
@@ -1667,11 +1238,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 
                     wiimote_tracking_state_reset_session(&wiimote_state);
                     set_wiimote_rightmost_led();
-                    reset_pointer_motion_state();
-                    prev_consumer_keycode = 0;
-                    home_b_combo_latched = false;
-                    prev_gamepad_hat = 0x08u;
-                    prev_gamepad_buttons = 0;
+                    hid_reset_output_state();
                     inactivity_prev_buttons = 0xFFFF; // force first reset
                     inactivity_prev_have_norm = false;
                     inactivity_prev_norm_x = 0;
@@ -1710,17 +1277,13 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 
                 case HID_SUBEVENT_CONNECTION_CLOSED:
                     printf("Wii Remote disconnected\n");
-                    hid_connected = false;
+                    hid_set_connected(false);
                     hid_host_cid = 0;
                     pending_connect = false;
                     btstack_run_loop_remove_timer(&inactivity_timer);
                     btstack_run_loop_remove_timer(&connect_retry_timer);
                     wiimote_tracking_state_reset_session(&wiimote_state);
-                    reset_pointer_motion_state();
-                    prev_consumer_keycode = 0;
-                    home_b_combo_latched = false;
-                    prev_gamepad_hat = 0x08u;
-                    prev_gamepad_buttons = 0;
+                    hid_reset_output_state();
                     inactivity_prev_have_norm = false;
                     inactivity_prev_norm_x = 0;
                     inactivity_prev_norm_y = 0;
@@ -1759,7 +1322,18 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
     }
 }
 
-static void hid_host_setup(void) {
+void wiimote_init(void) {
+    wiimote_tracking_state_init(&wiimote_state);
+    if (load_persisted_target_addr(wiimote_state.target_addr)) {
+        wiimote_state.target_addr_configured = true;
+        printf("Loaded saved target address: %s\n", bd_addr_to_str(wiimote_state.target_addr));
+    } else {
+        wiimote_state.target_addr_configured = false;
+        printf("No saved target address; starting in discovery mode\n");
+    }
+
+    hid_init(&wiimote_state);
+
     l2cap_init();
     hid_host_init(hid_descriptor_storage, sizeof(hid_descriptor_storage));
     hid_host_register_packet_handler(packet_handler);
@@ -1782,28 +1356,6 @@ static void hid_host_setup(void) {
     btstack_run_loop_set_timer_handler(&bt_reset_timer, bt_reset_timer_handler);
     btstack_run_loop_set_timer_handler(&sync_mode_timer, sync_mode_timeout_timer_handler);
     btstack_run_loop_set_timer_handler(&bootsel_poll_timer, bootsel_poll_timer_handler);
-}
-
-void wiimote_init(void) {
-    wiimote_tracking_state_init(&wiimote_state);
-    if (load_persisted_target_addr(wiimote_state.target_addr)) {
-        wiimote_state.target_addr_configured = true;
-        printf("Loaded saved target address: %s\n", bd_addr_to_str(wiimote_state.target_addr));
-    } else {
-        wiimote_state.target_addr_configured = false;
-        printf("No saved target address; starting in discovery mode\n");
-    }
-
-    hid_host_setup();
-
-    // Enable for debugging button and IR state
-    // btstack_run_loop_set_timer_handler(&button_print_timer, button_print_timer_handler);
-    // btstack_run_loop_set_timer(&button_print_timer, BUTTON_PRINT_PERIOD_MS);
-    // btstack_run_loop_add_timer(&button_print_timer);
-
-    btstack_run_loop_set_timer_handler(&hid_report_timer, hid_report_timer_handler);
-    btstack_run_loop_set_timer(&hid_report_timer, 10);
-    btstack_run_loop_add_timer(&hid_report_timer);
 
     btstack_run_loop_set_timer(&bootsel_poll_timer, BOOTSEL_POLL_PERIOD_MS);
     btstack_run_loop_add_timer(&bootsel_poll_timer);
