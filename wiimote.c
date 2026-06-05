@@ -97,15 +97,27 @@ typedef struct {
 
 static const char *wii_name_prefix = "Nintendo RVL-CNT-01";
 
+typedef enum {
+    WIIMOTE_TIMER_BUTTON_PRINT = 0,
+    WIIMOTE_TIMER_BOOTSEL_POLL,
+    WIIMOTE_TIMER_IR_INIT,
+    WIIMOTE_TIMER_CONNECT_RETRY,
+    WIIMOTE_TIMER_INACTIVITY,
+    WIIMOTE_TIMER_RECONNECT_COOLDOWN,
+    WIIMOTE_TIMER_BT_RESET,
+    WIIMOTE_TIMER_SYNC_MODE,
+    WIIMOTE_TIMER_COUNT,
+} wiimote_timer_id_t;
+
+typedef struct {
+    bool active;
+    uint32_t due_ms;
+} wiimote_virtual_timer_t;
+
 static btstack_packet_callback_registration_t hci_event_callback_registration;
-static btstack_timer_source_t button_print_timer;
-static btstack_timer_source_t bootsel_poll_timer;
-static btstack_timer_source_t ir_init_timer;
-static btstack_timer_source_t connect_retry_timer;
-static btstack_timer_source_t inactivity_timer;
-static btstack_timer_source_t reconnect_cooldown_timer;
-static btstack_timer_source_t bt_reset_timer;
-static btstack_timer_source_t sync_mode_timer;
+static btstack_timer_source_t wiimote_timer;
+static wiimote_virtual_timer_t wiimote_timers[WIIMOTE_TIMER_COUNT];
+static bool wiimote_timer_armed;
 static uint8_t hid_descriptor_storage[MAX_ATTRIBUTE_VALUE_SIZE];
 
 static hid_protocol_mode_t hid_host_report_mode = HID_PROTOCOL_MODE_REPORT;
@@ -266,15 +278,60 @@ static const char *error_code_to_string(uint8_t status) {
 }
 
 static void start_scan(void);
+static void wiimote_timer_dispatch(wiimote_timer_id_t timer_id);
+static void wiimote_timer_handler(btstack_timer_source_t *ts);
+
+static bool wiimote_time_reached(uint32_t now_ms, uint32_t due_ms) {
+    return (int32_t)(now_ms - due_ms) >= 0;
+}
+
+static void wiimote_update_timer_schedule(void) {
+    uint32_t now_ms = btstack_run_loop_get_time_ms();
+    bool have_due_time = false;
+    uint32_t next_due_ms = 0;
+
+    if (wiimote_timer_armed) {
+        btstack_run_loop_remove_timer(&wiimote_timer);
+        wiimote_timer_armed = false;
+    }
+
+    for (int i = 0; i < WIIMOTE_TIMER_COUNT; i++) {
+        if (!wiimote_timers[i].active) {
+            continue;
+        }
+        if (!have_due_time || wiimote_time_reached(next_due_ms, wiimote_timers[i].due_ms)) {
+            next_due_ms = wiimote_timers[i].due_ms;
+            have_due_time = true;
+        }
+    }
+
+    if (!have_due_time) {
+        return;
+    }
+
+    uint32_t delay_ms = wiimote_time_reached(now_ms, next_due_ms) ? 0 : (next_due_ms - now_ms);
+    btstack_run_loop_set_timer(&wiimote_timer, delay_ms);
+    btstack_run_loop_add_timer(&wiimote_timer);
+    wiimote_timer_armed = true;
+}
+
+static void wiimote_virtual_timer_start(wiimote_timer_id_t timer_id, uint32_t delay_ms) {
+    wiimote_timers[timer_id].active = true;
+    wiimote_timers[timer_id].due_ms = btstack_run_loop_get_time_ms() + delay_ms;
+    wiimote_update_timer_schedule();
+}
+
+static void wiimote_virtual_timer_stop(wiimote_timer_id_t timer_id) {
+    wiimote_timers[timer_id].active = false;
+    wiimote_update_timer_schedule();
+}
 
 static bool is_passive_disconnect_reason(uint8_t reason) {
     return reason == WIIMOTE_DISCONNECT_REASON_POWER_OFF ||
            reason == WIIMOTE_DISCONNECT_REASON_REMOTE_USER_TERMINATED;
 }
 
-static void sync_mode_timeout_timer_handler(btstack_timer_source_t *ts) {
-    (void)ts;
-
+static void sync_mode_timeout_timer_handler(void) {
     if (!sync_mode_active) {
         return;
     }
@@ -299,12 +356,11 @@ static void enter_sync_mode(void) {
     inactivity_disconnect_requested = false;
     pending_connect = false;
 
-    btstack_run_loop_remove_timer(&connect_retry_timer);
-    btstack_run_loop_remove_timer(&reconnect_cooldown_timer);
-    btstack_run_loop_remove_timer(&sync_mode_timer);
+    wiimote_virtual_timer_stop(WIIMOTE_TIMER_CONNECT_RETRY);
+    wiimote_virtual_timer_stop(WIIMOTE_TIMER_RECONNECT_COOLDOWN);
+    wiimote_virtual_timer_stop(WIIMOTE_TIMER_SYNC_MODE);
 
-    btstack_run_loop_set_timer(&sync_mode_timer, SYNC_MODE_TIMEOUT_MS);
-    btstack_run_loop_add_timer(&sync_mode_timer);
+    wiimote_virtual_timer_start(WIIMOTE_TIMER_SYNC_MODE, SYNC_MODE_TIMEOUT_MS);
 
     printf("Sync mode started (%d ms). Searching for Nintendo prefix %s\n",
            SYNC_MODE_TIMEOUT_MS,
@@ -327,19 +383,16 @@ static void request_bt_stack_reset(void) {
     bt_reset_in_progress = true;
     bt_reset_waiting_for_power_on = true;
 
-    btstack_run_loop_remove_timer(&connect_retry_timer);
-    btstack_run_loop_remove_timer(&reconnect_cooldown_timer);
+    wiimote_virtual_timer_stop(WIIMOTE_TIMER_CONNECT_RETRY);
+    wiimote_virtual_timer_stop(WIIMOTE_TIMER_RECONNECT_COOLDOWN);
 
     printf("BT reset: power OFF\n");
     hci_power_control(HCI_POWER_OFF);
 
-    btstack_run_loop_set_timer(&bt_reset_timer, BT_RESET_POWER_ON_DELAY_MS);
-    btstack_run_loop_add_timer(&bt_reset_timer);
+    wiimote_virtual_timer_start(WIIMOTE_TIMER_BT_RESET, BT_RESET_POWER_ON_DELAY_MS);
 }
 
-static void bt_reset_timer_handler(btstack_timer_source_t *ts) {
-    (void)ts;
-
+static void bt_reset_timer_handler(void) {
     if (!bt_reset_waiting_for_power_on) {
         return;
     }
@@ -356,8 +409,7 @@ static void bt_reset_timer_handler(btstack_timer_source_t *ts) {
     }
 }
 
-static void reconnect_cooldown_timer_handler(btstack_timer_source_t *ts) {
-    (void)ts;
+static void reconnect_cooldown_timer_handler(void) {
     reconnect_cooldown_active = false;
     if (passive_reconnect_mode) {
         printf("Reconnect cooldown ended; passive wake mode active. Press any Wii Remote button to reconnect.\n");
@@ -367,8 +419,7 @@ static void reconnect_cooldown_timer_handler(btstack_timer_source_t *ts) {
     }
 }
 
-static void connect_retry_timer_handler(btstack_timer_source_t *ts) {
-    (void)ts;
+static void connect_retry_timer_handler(void) {
     if (passive_reconnect_mode) {
         printf("Reconnect retry skipped; passive wake mode active. Press any Wii Remote button to reconnect.\n");
         return;
@@ -407,8 +458,7 @@ static void start_scan(void) {
             pending_connect = true;
         } else {
             printf("Connect attempt failed (0x%02x), retry in %dms\n", status, CONNECT_RETRY_MS);
-            btstack_run_loop_set_timer(&connect_retry_timer, CONNECT_RETRY_MS);
-            btstack_run_loop_add_timer(&connect_retry_timer);
+            wiimote_virtual_timer_start(WIIMOTE_TIMER_CONNECT_RETRY, CONNECT_RETRY_MS);
         }
     } else {
         printf("No target address. Put Wii Remote into discoverable mode (press 1+2).\n");
@@ -563,13 +613,10 @@ static void request_wiimote_ir_report(wiimote_tracking_state_t *state) {
     state->ir_mode_index = 0;
     state->ir_mode_retry_count = 0;
     printf("Applying IR profile: %s\n", wiimote_ir_profiles[state->ir_sensitivity_index].name);
-    btstack_run_loop_set_timer(&ir_init_timer, 10);
-    btstack_run_loop_add_timer(&ir_init_timer);
+    wiimote_virtual_timer_start(WIIMOTE_TIMER_IR_INIT, 10);
 }
 
-static void wiimote_ir_init_timer_handler_state(wiimote_tracking_state_t *state, btstack_timer_source_t *ts) {
-    (void)ts;
-
+static void wiimote_ir_init_timer_handler_state(wiimote_tracking_state_t *state) {
     if (!hid_is_connected(g_hid_state) || !state->ir_init_in_progress) {
         return;
     }
@@ -645,12 +692,9 @@ static void wiimote_ir_init_timer_handler_state(wiimote_tracking_state_t *state,
         return;
     }
 
-    btstack_run_loop_set_timer(&ir_init_timer, state->ir_init_step == WIIMOTE_IR_INIT_REPORT_MODE_SELECT ? 120 : 40);
-    btstack_run_loop_add_timer(&ir_init_timer);
-}
-
-static void wiimote_ir_init_timer_handler(btstack_timer_source_t *ts) {
-    wiimote_ir_init_timer_handler_state(g_wiimote_state, ts);
+    wiimote_virtual_timer_start(
+        WIIMOTE_TIMER_IR_INIT,
+        state->ir_init_step == WIIMOTE_IR_INIT_REPORT_MODE_SELECT ? 120 : 40);
 }
 
 static void compute_ir_norm(wiimote_tracking_state_t *state, uint16_t cx, uint16_t cy, uint16_t spread_x, uint16_t spread_y) {
@@ -799,9 +843,7 @@ static void reset_inactivity_timer(uint16_t buttons) {
     if (buttons == inactivity_prev_buttons) return;
     printf("Inactivity timer reset (buttons 0x%04x -> 0x%04x)\n", inactivity_prev_buttons, buttons);
     inactivity_prev_buttons = buttons;
-    btstack_run_loop_remove_timer(&inactivity_timer);
-    btstack_run_loop_set_timer(&inactivity_timer, INACTIVITY_TIMEOUT_MS);
-    btstack_run_loop_add_timer(&inactivity_timer);
+    wiimote_virtual_timer_start(WIIMOTE_TIMER_INACTIVITY, INACTIVITY_TIMEOUT_MS);
 }
 
 static void reset_inactivity_timer_on_ir_activity(const wiimote_tracking_state_t *state) {
@@ -819,9 +861,7 @@ static void reset_inactivity_timer_on_ir_activity(const wiimote_tracking_state_t
         inactivity_prev_norm_x = state->norm_x;
         inactivity_prev_norm_y = state->norm_y;
         printf("Inactivity timer reset (IR acquired at norm=(%u,%u))\n", state->norm_x, state->norm_y);
-        btstack_run_loop_remove_timer(&inactivity_timer);
-        btstack_run_loop_set_timer(&inactivity_timer, INACTIVITY_TIMEOUT_MS);
-        btstack_run_loop_add_timer(&inactivity_timer);
+        wiimote_virtual_timer_start(WIIMOTE_TIMER_INACTIVITY, INACTIVITY_TIMEOUT_MS);
         return;
     }
 
@@ -838,14 +878,11 @@ static void reset_inactivity_timer_on_ir_activity(const wiimote_tracking_state_t
                dy);
         inactivity_prev_norm_x = state->norm_x;
         inactivity_prev_norm_y = state->norm_y;
-        btstack_run_loop_remove_timer(&inactivity_timer);
-        btstack_run_loop_set_timer(&inactivity_timer, INACTIVITY_TIMEOUT_MS);
-        btstack_run_loop_add_timer(&inactivity_timer);
+        wiimote_virtual_timer_start(WIIMOTE_TIMER_INACTIVITY, INACTIVITY_TIMEOUT_MS);
     }
 }
 
-static void inactivity_timer_handler(btstack_timer_source_t *ts) {
-    (void)ts;
+static void inactivity_timer_handler(void) {
     if (hid_is_connected(g_hid_state)) {
         printf("Inactivity timeout (%d ms): disconnecting and entering passive wake mode\n", INACTIVITY_TIMEOUT_MS);
         inactivity_disconnect_requested = true;
@@ -946,9 +983,7 @@ static void parse_wiimote_report(wiimote_tracking_state_t *state, const uint8_t 
 
 }
 
-static void button_print_timer_handler_state(const wiimote_tracking_state_t *state, btstack_timer_source_t *ts) {
-    (void)ts;
-
+static void button_print_timer_handler_state(const wiimote_tracking_state_t *state) {
     if (hid_is_connected(g_hid_state) && state->have_buttons) {
         printf("Buttons: %s\n", buttons_to_string(state->buttons));
     }
@@ -978,12 +1013,7 @@ static void button_print_timer_handler_state(const wiimote_tracking_state_t *sta
         printf("\n");
     }
 
-    btstack_run_loop_set_timer(&button_print_timer, BUTTON_PRINT_PERIOD_MS);
-    btstack_run_loop_add_timer(&button_print_timer);
-}
-
-static void button_print_timer_handler(btstack_timer_source_t *ts) {
-    button_print_timer_handler_state(g_wiimote_state, ts);
+    wiimote_virtual_timer_start(WIIMOTE_TIMER_BUTTON_PRINT, BUTTON_PRINT_PERIOD_MS);
 }
 
 static bool __no_inline_not_in_flash_func(read_bootsel_button_pressed)(void) {
@@ -1015,9 +1045,7 @@ static bool __no_inline_not_in_flash_func(read_bootsel_button_pressed)(void) {
     return !cs_high;
 }
 
-static void bootsel_poll_timer_handler(btstack_timer_source_t *ts) {
-    (void)ts;
-
+static void bootsel_poll_timer_handler(void) {
     bool pressed = read_bootsel_button_pressed();
     if (pressed != bootsel_prev_pressed) {
         printf("BOOTSEL: %s\n", pressed ? "pressed" : "released");
@@ -1033,8 +1061,68 @@ static void bootsel_poll_timer_handler(btstack_timer_source_t *ts) {
         set_onboard_led(false);
     }
 
-    btstack_run_loop_set_timer(&bootsel_poll_timer, BOOTSEL_POLL_PERIOD_MS);
-    btstack_run_loop_add_timer(&bootsel_poll_timer);
+    wiimote_virtual_timer_start(WIIMOTE_TIMER_BOOTSEL_POLL, BOOTSEL_POLL_PERIOD_MS);
+}
+
+static void wiimote_timer_dispatch(wiimote_timer_id_t timer_id) {
+    switch (timer_id) {
+        case WIIMOTE_TIMER_BUTTON_PRINT:
+            button_print_timer_handler_state(g_wiimote_state);
+            break;
+        case WIIMOTE_TIMER_BOOTSEL_POLL:
+            bootsel_poll_timer_handler();
+            break;
+        case WIIMOTE_TIMER_IR_INIT:
+            wiimote_ir_init_timer_handler_state(g_wiimote_state);
+            break;
+        case WIIMOTE_TIMER_CONNECT_RETRY:
+            connect_retry_timer_handler();
+            break;
+        case WIIMOTE_TIMER_INACTIVITY:
+            inactivity_timer_handler();
+            break;
+        case WIIMOTE_TIMER_RECONNECT_COOLDOWN:
+            reconnect_cooldown_timer_handler();
+            break;
+        case WIIMOTE_TIMER_BT_RESET:
+            bt_reset_timer_handler();
+            break;
+        case WIIMOTE_TIMER_SYNC_MODE:
+            sync_mode_timeout_timer_handler();
+            break;
+        default:
+            break;
+    }
+}
+
+static void wiimote_timer_handler(btstack_timer_source_t *ts) {
+    (void)ts;
+
+    if (wiimote_timer_armed) {
+        wiimote_timer_armed = false;
+    }
+
+    for (;;) {
+        uint32_t now_ms = btstack_run_loop_get_time_ms();
+        bool handled_due_timer = false;
+
+        for (int i = 0; i < WIIMOTE_TIMER_COUNT; i++) {
+            if (!wiimote_timers[i].active || !wiimote_time_reached(now_ms, wiimote_timers[i].due_ms)) {
+                continue;
+            }
+
+            wiimote_timers[i].active = false;
+            wiimote_timer_dispatch((wiimote_timer_id_t)i);
+            handled_due_timer = true;
+            break;
+        }
+
+        if (!handled_due_timer) {
+            break;
+        }
+    }
+
+    wiimote_update_timer_schedule();
 }
 
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
@@ -1164,12 +1252,11 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 
                 if (!inactivity_disconnect_requested && is_passive_disconnect_reason(reason)) {
                     passive_reconnect_mode = true;
-                    btstack_run_loop_remove_timer(&connect_retry_timer);
+                    wiimote_virtual_timer_stop(WIIMOTE_TIMER_CONNECT_RETRY);
 
                     reconnect_cooldown_active = true;
-                    btstack_run_loop_remove_timer(&reconnect_cooldown_timer);
-                    btstack_run_loop_set_timer(&reconnect_cooldown_timer, RECONNECT_COOLDOWN_MS);
-                    btstack_run_loop_add_timer(&reconnect_cooldown_timer);
+                    wiimote_virtual_timer_stop(WIIMOTE_TIMER_RECONNECT_COOLDOWN);
+                    wiimote_virtual_timer_start(WIIMOTE_TIMER_RECONNECT_COOLDOWN, RECONNECT_COOLDOWN_MS);
 
                     printf("Disconnect reason 0x%02x -> passive wake mode guard for %d ms\n",
                            reason,
@@ -1212,8 +1299,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                         if (sync_mode_active) {
                             start_scan();
                         } else {
-                            btstack_run_loop_set_timer(&connect_retry_timer, CONNECT_RETRY_MS);
-                            btstack_run_loop_add_timer(&connect_retry_timer);
+                            wiimote_virtual_timer_start(WIIMOTE_TIMER_CONNECT_RETRY, CONNECT_RETRY_MS);
                         }
                         break;
                     }
@@ -1241,7 +1327,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                                bd_addr_to_str(connected_addr),
                                saved ? "saved" : "save failed");
                         sync_mode_active = false;
-                        btstack_run_loop_remove_timer(&sync_mode_timer);
+                        wiimote_virtual_timer_stop(WIIMOTE_TIMER_SYNC_MODE);
                         set_onboard_led(false);
                     }
 
@@ -1289,8 +1375,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                         hid_set_connected(g_hid_state, false);
                     hid_host_cid = 0;
                     pending_connect = false;
-                    btstack_run_loop_remove_timer(&inactivity_timer);
-                    btstack_run_loop_remove_timer(&connect_retry_timer);
+                    wiimote_virtual_timer_stop(WIIMOTE_TIMER_INACTIVITY);
+                    wiimote_virtual_timer_stop(WIIMOTE_TIMER_CONNECT_RETRY);
                     wiimote_tracking_state_reset_session(g_wiimote_state);
                     hid_reset_output_state(g_hid_state);
                     inactivity_prev_have_norm = false;
@@ -1301,19 +1387,16 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                         request_bt_stack_reset();
                         reconnect_cooldown_active = true;
                         printf("Inactivity disconnect: waiting %d ms before reconnect\n", RECONNECT_COOLDOWN_MS);
-                        btstack_run_loop_set_timer(&reconnect_cooldown_timer, RECONNECT_COOLDOWN_MS);
-                        btstack_run_loop_add_timer(&reconnect_cooldown_timer);
+                        wiimote_virtual_timer_start(WIIMOTE_TIMER_RECONNECT_COOLDOWN, RECONNECT_COOLDOWN_MS);
                     } else if (is_passive_disconnect_reason(wiimote_last_disconnect_reason)) {
                         passive_reconnect_mode = true;
                         reconnect_cooldown_active = true;
-                        btstack_run_loop_set_timer(&reconnect_cooldown_timer, RECONNECT_COOLDOWN_MS);
-                        btstack_run_loop_add_timer(&reconnect_cooldown_timer);
+                        wiimote_virtual_timer_start(WIIMOTE_TIMER_RECONNECT_COOLDOWN, RECONNECT_COOLDOWN_MS);
                         printf("Passive disconnect reason 0x%02x: passive wake mode active. Press any Wii Remote button to reconnect.\n",
                                wiimote_last_disconnect_reason);
                     } else {
                         passive_reconnect_mode = false;
-                        btstack_run_loop_set_timer(&connect_retry_timer, DISCONNECT_REASON_SETTLE_MS);
-                        btstack_run_loop_add_timer(&connect_retry_timer);
+                        wiimote_virtual_timer_start(WIIMOTE_TIMER_CONNECT_RETRY, DISCONNECT_REASON_SETTLE_MS);
                         printf("Disconnect reason pending/non-passive; re-evaluating reconnect in %d ms\n",
                                DISCONNECT_REASON_SETTLE_MS);
                     }
@@ -1360,14 +1443,6 @@ void wiimote_init_state(wiimote_tracking_state_t *wiimote_state, wiimote_behavio
     hci_event_callback_registration.callback = &packet_handler;
     hci_add_event_handler(&hci_event_callback_registration);
 
-    btstack_run_loop_set_timer_handler(&ir_init_timer, wiimote_ir_init_timer_handler);
-    btstack_run_loop_set_timer_handler(&inactivity_timer, inactivity_timer_handler);
-    btstack_run_loop_set_timer_handler(&connect_retry_timer, connect_retry_timer_handler);
-    btstack_run_loop_set_timer_handler(&reconnect_cooldown_timer, reconnect_cooldown_timer_handler);
-    btstack_run_loop_set_timer_handler(&bt_reset_timer, bt_reset_timer_handler);
-    btstack_run_loop_set_timer_handler(&sync_mode_timer, sync_mode_timeout_timer_handler);
-    btstack_run_loop_set_timer_handler(&bootsel_poll_timer, bootsel_poll_timer_handler);
-
-    btstack_run_loop_set_timer(&bootsel_poll_timer, BOOTSEL_POLL_PERIOD_MS);
-    btstack_run_loop_add_timer(&bootsel_poll_timer);
+    btstack_run_loop_set_timer_handler(&wiimote_timer, wiimote_timer_handler);
+    wiimote_virtual_timer_start(WIIMOTE_TIMER_BOOTSEL_POLL, BOOTSEL_POLL_PERIOD_MS);
 }
