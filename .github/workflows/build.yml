@@ -9,6 +9,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        board: [pico_w, pico2_w]
+      fail-fast: false
 
     env:
       PICO_SDK_VERSION: "2.2.0"
@@ -46,26 +50,28 @@ jobs:
             https://github.com/raspberrypi/pico-sdk.git \
             ${{ github.workspace }}/pico-sdk
 
-      - name: Configure
+      - name: Configure for ${{ matrix.board }}
         run: |
-          mkdir -p build
+          mkdir -p build-${{ matrix.board }}
           cmake \
             -G Ninja \
-            -B build \
+            -B build-${{ matrix.board }} \
             -S . \
-            -DPICO_BOARD=pico2_w \
+            -DPICO_BOARD=${{ matrix.board }} \
             -DPICO_SDK_PATH=${{ github.workspace }}/pico-sdk \
             -DCMAKE_BUILD_TYPE=Release
         env:
           PICO_SDK_PATH: ${{ github.workspace }}/pico-sdk
 
-      - name: Build
-        run: cmake --build build --parallel
+      - name: Build for ${{ matrix.board }}
+        run: cmake --build build-${{ matrix.board }} --parallel
 
-      - name: Upload UF2 artifact
+      - name: Upload UF2 artifact for ${{ matrix.board }}
         uses: actions/upload-artifact@v4
         with:
-          name: piicomouse2-${{ github.sha }}
-          path: build/piicomouse2.uf2
+          name: piicomouse2-${{ matrix.board }}-${{ github.sha }}
+          path: |
+            build-${{ matrix.board }}/piicomouse2-*.uf2
+            build-${{ matrix.board }}/piicomouse2-*.dis
           if-no-files-found: error
           retention-days: 90
