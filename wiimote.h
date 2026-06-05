@@ -52,5 +52,7 @@ typedef struct {
 typedef void (*wiimote_behavior_profile_t)(wiimote_tracking_state_t *wiimote);
 
 void wiimote_init_state(wiimote_tracking_state_t *wiimote_state, wiimote_behavior_profile_t profile);
+void wiimote_enter_sync_mode(void);
+
 
 #endif

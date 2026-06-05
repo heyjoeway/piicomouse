@@ -6,8 +6,6 @@
 
 #include "hardware/flash.h"
 #include "hardware/regs/addressmap.h"
-#include "hardware/structs/ioqspi.h"
-#include "hardware/structs/sio.h"
 #include "hardware/sync.h"
 
 #include "btstack_config.h"
@@ -22,7 +20,6 @@ bool tud_mounted(void);
 #define INQUIRY_SECONDS 5
 #define CONNECT_RETRY_MS 1500
 #define BUTTON_PRINT_PERIOD_MS 200
-#define BOOTSEL_POLL_PERIOD_MS 1000
 #define SYNC_MODE_TIMEOUT_MS 60000
 #define MAX_ATTRIBUTE_VALUE_SIZE 300
 #define INACTIVITY_TIMEOUT_MS 300000
@@ -99,13 +96,13 @@ static const char *wii_name_prefix = "Nintendo RVL-CNT-01";
 
 typedef enum {
     WIIMOTE_TIMER_BUTTON_PRINT = 0,
-    WIIMOTE_TIMER_BOOTSEL_POLL,
     WIIMOTE_TIMER_IR_INIT,
     WIIMOTE_TIMER_CONNECT_RETRY,
     WIIMOTE_TIMER_INACTIVITY,
     WIIMOTE_TIMER_RECONNECT_COOLDOWN,
     WIIMOTE_TIMER_BT_RESET,
-    WIIMOTE_TIMER_SYNC_MODE,
+    WIIMOTE_TIMER_SYNC_MODE_TIMEOUT,
+    WIIMOTE_TIMER_SYNC_MODE_FLASH,
     WIIMOTE_TIMER_COUNT,
 } wiimote_timer_id_t;
 
@@ -139,7 +136,6 @@ static bool inactivity_prev_have_norm = false;
 static uint16_t inactivity_prev_norm_x = 0;
 static uint16_t inactivity_prev_norm_y = 0;
 static bool onboard_led_on = false;
-static bool bootsel_prev_pressed = false;
 static wiimote_behavior_profile_t g_behavior_profile = NULL;
 
 static void set_onboard_led(bool on) {
@@ -345,7 +341,16 @@ static void sync_mode_timeout_timer_handler(void) {
     }
 }
 
-static void enter_sync_mode(void) {
+static void sync_mode_flash_timer_handler(void) {
+    if (sync_mode_active) {
+        set_onboard_led(!onboard_led_on);
+    } else {
+        set_onboard_led(false);
+    }
+    wiimote_virtual_timer_start(WIIMOTE_TIMER_SYNC_MODE_FLASH, 1000);
+}
+
+void wiimote_enter_sync_mode(void) {
     if (sync_mode_active) {
         return;
     }
@@ -358,9 +363,11 @@ static void enter_sync_mode(void) {
 
     wiimote_virtual_timer_stop(WIIMOTE_TIMER_CONNECT_RETRY);
     wiimote_virtual_timer_stop(WIIMOTE_TIMER_RECONNECT_COOLDOWN);
-    wiimote_virtual_timer_stop(WIIMOTE_TIMER_SYNC_MODE);
-
-    wiimote_virtual_timer_start(WIIMOTE_TIMER_SYNC_MODE, SYNC_MODE_TIMEOUT_MS);
+    wiimote_virtual_timer_stop(WIIMOTE_TIMER_SYNC_MODE_TIMEOUT);
+    wiimote_virtual_timer_stop(WIIMOTE_TIMER_SYNC_MODE_FLASH);
+    
+    wiimote_virtual_timer_start(WIIMOTE_TIMER_SYNC_MODE_TIMEOUT, SYNC_MODE_TIMEOUT_MS);
+    wiimote_virtual_timer_start(WIIMOTE_TIMER_SYNC_MODE_FLASH, 0);
 
     printf("Sync mode started (%d ms). Searching for Nintendo prefix %s\n",
            SYNC_MODE_TIMEOUT_MS,
@@ -1016,61 +1023,11 @@ static void button_print_timer_handler_state(const wiimote_tracking_state_t *sta
     wiimote_virtual_timer_start(WIIMOTE_TIMER_BUTTON_PRINT, BUTTON_PRINT_PERIOD_MS);
 }
 
-static bool __no_inline_not_in_flash_func(read_bootsel_button_pressed)(void) {
-    const uint cs_pin_index = 1;
-    uint32_t flags = save_and_disable_interrupts();
-
-    // Float QSPI CS so the BOOTSEL switch can pull it low while XIP is paused.
-    hw_write_masked(&ioqspi_hw->io[cs_pin_index].ctrl,
-                    GPIO_OVERRIDE_LOW << IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_LSB,
-                    IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_BITS);
-
-    for (volatile int i = 0; i < 1000; ++i) {
-    }
-
-#ifdef __ARM_ARCH_6M__
-    const uint32_t cs_bit = (1u << 1);
-#else
-    const uint32_t cs_bit = SIO_GPIO_HI_IN_QSPI_CSN_BITS;
-#endif
-    bool cs_high = (sio_hw->gpio_hi_in & cs_bit) != 0;
-
-    hw_write_masked(&ioqspi_hw->io[cs_pin_index].ctrl,
-                    GPIO_OVERRIDE_NORMAL << IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_LSB,
-                    IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_BITS);
-
-    restore_interrupts(flags);
-
-    // BOOTSEL pulls CS low when pressed.
-    return !cs_high;
-}
-
-static void bootsel_poll_timer_handler(void) {
-    bool pressed = read_bootsel_button_pressed();
-    if (pressed != bootsel_prev_pressed) {
-        printf("BOOTSEL: %s\n", pressed ? "pressed" : "released");
-        if (pressed) {
-            enter_sync_mode();
-        }
-        bootsel_prev_pressed = pressed;
-    }
-
-    if (sync_mode_active) {
-        set_onboard_led(!onboard_led_on);
-    } else {
-        set_onboard_led(false);
-    }
-
-    wiimote_virtual_timer_start(WIIMOTE_TIMER_BOOTSEL_POLL, BOOTSEL_POLL_PERIOD_MS);
-}
 
 static void wiimote_timer_dispatch(wiimote_timer_id_t timer_id) {
     switch (timer_id) {
         case WIIMOTE_TIMER_BUTTON_PRINT:
             button_print_timer_handler_state(g_wiimote_state);
-            break;
-        case WIIMOTE_TIMER_BOOTSEL_POLL:
-            bootsel_poll_timer_handler();
             break;
         case WIIMOTE_TIMER_IR_INIT:
             wiimote_ir_init_timer_handler_state(g_wiimote_state);
@@ -1087,8 +1044,11 @@ static void wiimote_timer_dispatch(wiimote_timer_id_t timer_id) {
         case WIIMOTE_TIMER_BT_RESET:
             bt_reset_timer_handler();
             break;
-        case WIIMOTE_TIMER_SYNC_MODE:
+        case WIIMOTE_TIMER_SYNC_MODE_TIMEOUT:
             sync_mode_timeout_timer_handler();
+            break;
+        case WIIMOTE_TIMER_SYNC_MODE_FLASH:
+            sync_mode_flash_timer_handler();
             break;
         default:
             break;
@@ -1327,7 +1287,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                                bd_addr_to_str(connected_addr),
                                saved ? "saved" : "save failed");
                         sync_mode_active = false;
-                        wiimote_virtual_timer_stop(WIIMOTE_TIMER_SYNC_MODE);
+                        wiimote_virtual_timer_stop(WIIMOTE_TIMER_SYNC_MODE_TIMEOUT);
+                        wiimote_virtual_timer_stop(WIIMOTE_TIMER_SYNC_MODE_FLASH);
                         set_onboard_led(false);
                     }
 
@@ -1444,5 +1405,4 @@ void wiimote_init_state(wiimote_tracking_state_t *wiimote_state, wiimote_behavio
     hci_add_event_handler(&hci_event_callback_registration);
 
     btstack_run_loop_set_timer_handler(&wiimote_timer, wiimote_timer_handler);
-    wiimote_virtual_timer_start(WIIMOTE_TIMER_BOOTSEL_POLL, BOOTSEL_POLL_PERIOD_MS);
 }

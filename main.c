@@ -6,6 +6,9 @@
 #include "btstack.h"
 #include "wiimote.h"
 #include "hid.h"
+#include "bootsel.h"
+
+#define BOOTSEL_POLL_PERIOD_MS 1000
 
 // Global state objects
 static wiimote_tracking_state_t wiimote_state = {0};
@@ -40,6 +43,11 @@ static uint8_t profile_buttons_to_hat(uint16_t buttons) {
     if (left && !right) return 6;
     if (right && !left) return 2;
     return 0x08u;
+}
+
+static void bootsel_poll_callback(bool pressed, bool changed) {
+    if (changed) printf("BOOTSEL: %s\n", pressed ? "pressed" : "released");
+    if (pressed) wiimote_enter_sync_mode();
 }
 
 void profile_wiimote_default(wiimote_tracking_state_t *wiimote) {
@@ -146,10 +154,8 @@ int main(void) {
         return 1;
     }
 
-    // Initialize HID module (pure output layer)
+    bootsel_init(BOOTSEL_POLL_PERIOD_MS, bootsel_poll_callback);
     hid_init(&hid_state);
-
-    // Initialize Wii Remote module (Bluetooth + parsing)
     wiimote_init_state(&wiimote_state, profile_wiimote_default);
 
     hci_power_control(HCI_POWER_ON);
