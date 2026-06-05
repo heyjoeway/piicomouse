@@ -128,6 +128,7 @@ static uint16_t inactivity_prev_norm_x = 0;
 static uint16_t inactivity_prev_norm_y = 0;
 static bool onboard_led_on = false;
 static bool bootsel_prev_pressed = false;
+static wiimote_behavior_profile_t g_behavior_profile = NULL;
 
 static void set_onboard_led(bool on) {
     if (onboard_led_on == on) {
@@ -864,7 +865,12 @@ static void apply_wiimote_buttons(wiimote_tracking_state_t *state, uint16_t raw_
 
     state->buttons = new_buttons;
     state->have_buttons = true;
-    handle_ir_profile_hotkeys(state, state->buttons);
+}
+
+static void run_behavior_profile(wiimote_tracking_state_t *state) {
+    if (g_behavior_profile != NULL) {
+        g_behavior_profile(state);
+    }
 }
 
 static void parse_wiimote_report(wiimote_tracking_state_t *state, const uint8_t *report, uint16_t report_len) {
@@ -913,6 +919,7 @@ static void parse_wiimote_report(wiimote_tracking_state_t *state, const uint8_t 
         if (status_changed && !state->ir_init_in_progress) {
             request_wiimote_ir_report(state);
         }
+        run_behavior_profile(state);
         return;
     }
 
@@ -934,6 +941,8 @@ static void parse_wiimote_report(wiimote_tracking_state_t *state, const uint8_t 
         parse_wiimote_ir_extended(state, &report[7], (uint16_t)(report_len - 7));
         reset_inactivity_timer_on_ir_activity(state);
     }
+
+    run_behavior_profile(state);
 
 }
 
@@ -1322,9 +1331,10 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
     }
 }
 
-void wiimote_init_state(wiimote_tracking_state_t *wiimote_state, hid_state_t *hid_state) {
+void wiimote_init_state(wiimote_tracking_state_t *wiimote_state, wiimote_behavior_profile_t profile) {
     g_wiimote_state = wiimote_state;
-    g_hid_state = hid_state;
+    g_hid_state = hid_get_state();
+    g_behavior_profile = profile;
 
     wiimote_tracking_state_init(g_wiimote_state);
     if (load_persisted_target_addr(g_wiimote_state->target_addr)) {

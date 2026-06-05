@@ -252,3 +252,7 @@ void hid_init(hid_state_t *state) {
     btstack_run_loop_set_timer(&state->report_timer, 10);
     btstack_run_loop_add_timer(&state->report_timer);
 }
+
+hid_state_t *hid_get_state(void) {
+    return g_hid_state;
+}

@@ -43,6 +43,7 @@ typedef struct {
 } hid_state_t;
 
 void hid_init(hid_state_t *state);
+hid_state_t *hid_get_state(void);
 void hid_set_connected(hid_state_t *state, bool connected);
 bool hid_is_connected(const hid_state_t *state);
 void hid_reset_output_state(hid_state_t *state);

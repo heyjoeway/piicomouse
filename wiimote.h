@@ -48,9 +48,9 @@ typedef struct {
     bool wii_pin_use_reversed;
 } wiimote_tracking_state_t;
 
-void wiimote_init_state(wiimote_tracking_state_t *wiimote_state, hid_state_t *hid_state);
-
 // Behavior profile: translates Wii Remote input to HID commands
-typedef void (*wiimote_behavior_profile_t)(const wiimote_tracking_state_t *wiimote, hid_state_t *hid);
+typedef void (*wiimote_behavior_profile_t)(wiimote_tracking_state_t *wiimote);
+
+void wiimote_init_state(wiimote_tracking_state_t *wiimote_state, wiimote_behavior_profile_t profile);
 
 #endif
