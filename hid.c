@@ -146,25 +146,22 @@ static void send_raw_consumer_control_report(hid_state_t *state, uint16_t keycod
     usb_hid_send_consumer_control_report(keycode);
 }
 
-static void hid_report_timer_handler(btstack_timer_source_t *ts) {
+static void hid_report_timer_callback(void) {
     if (g_hid_state != NULL) {
         if (process_hid_sleep_signal(g_hid_state)) {
-            btstack_run_loop_set_timer(&g_hid_state->report_timer, 10);
-            btstack_run_loop_add_timer(&g_hid_state->report_timer);
+            timer_manager_start(&g_hid_state->report_timer_manager, 0, 10);
             return;
         }
 
         if (process_hid_wake_nudge(g_hid_state)) {
-            btstack_run_loop_set_timer(&g_hid_state->report_timer, 10);
-            btstack_run_loop_add_timer(&g_hid_state->report_timer);
+            timer_manager_start(&g_hid_state->report_timer_manager, 0, 10);
             return;
         }
 
         // Keyboard always sent (currently empty)
         send_hid_keyboard_report(g_hid_state);
 
-        btstack_run_loop_set_timer(&g_hid_state->report_timer, 10);
-        btstack_run_loop_add_timer(&g_hid_state->report_timer);
+        timer_manager_start(&g_hid_state->report_timer_manager, 0, 10);
     }
 }
 
@@ -248,9 +245,9 @@ void hid_init(hid_state_t *state) {
     state->sleep_signal_stage = HID_SLEEP_SIGNAL_IDLE;
     state->wake_nudge_stage = HID_WAKE_NUDGE_IDLE;
 
-    btstack_run_loop_set_timer_handler(&state->report_timer, hid_report_timer_handler);
-    btstack_run_loop_set_timer(&state->report_timer, 10);
-    btstack_run_loop_add_timer(&state->report_timer);
+    state->report_timer_slot.callback = hid_report_timer_callback;
+    timer_manager_init(&state->report_timer_manager, &state->report_timer_slot, 1);
+    timer_manager_start(&state->report_timer_manager, 0, 10);
 }
 
 hid_state_t *hid_get_state(void) {

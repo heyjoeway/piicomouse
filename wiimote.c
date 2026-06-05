@@ -270,8 +270,6 @@ static const char *error_code_to_string(uint8_t status) {
 }
 
 static void start_scan(void);
-static void wiimote_timer_dispatch(wiimote_timer_id_t timer_id);
-static void wiimote_timer_handler(btstack_timer_source_t *ts);
 
 static bool is_passive_disconnect_reason(uint8_t reason) {
     return reason == WIIMOTE_DISCONNECT_REASON_POWER_OFF ||

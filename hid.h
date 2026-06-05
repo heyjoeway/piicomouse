@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "btstack.h"
+#include "timer.h"
 
 typedef enum {
     HID_MODE_POINTER = 0,
@@ -39,7 +40,8 @@ typedef struct {
     bool onboard_led_on;
     hid_sleep_signal_stage_t sleep_signal_stage;
     hid_wake_nudge_stage_t wake_nudge_stage;
-    btstack_timer_source_t report_timer;
+    timer_slot_t report_timer_slot;
+    timer_manager_t report_timer_manager;
 } hid_state_t;
 
 void hid_init(hid_state_t *state);

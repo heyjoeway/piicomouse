@@ -7,8 +7,10 @@
 #include "hardware/sync.h"
 
 #include "btstack.h"
+#include "timer.h"
 
-static btstack_timer_source_t bootsel_timer;
+static timer_slot_t bootsel_timer_slot;
+static timer_manager_t bootsel_timer_manager;
 static bootsel_poll_callback_t bootsel_callback = NULL;
 static uint32_t bootsel_poll_period_ms;
 static bool bootsel_prev_pressed;
@@ -40,9 +42,7 @@ static bool __no_inline_not_in_flash_func(read_bootsel_button_pressed)(void) {
     return !cs_high;
 }
 
-static void bootsel_timer_handler(btstack_timer_source_t *ts) {
-    (void)ts;
-
+static void bootsel_timer_callback(void) {
     bool pressed = read_bootsel_button_pressed();
     bool changed = pressed != bootsel_prev_pressed;
     if (changed) {
@@ -53,8 +53,7 @@ static void bootsel_timer_handler(btstack_timer_source_t *ts) {
         bootsel_callback(pressed, changed);
     }
 
-    btstack_run_loop_set_timer(&bootsel_timer, bootsel_poll_period_ms);
-    btstack_run_loop_add_timer(&bootsel_timer);
+    timer_manager_start(&bootsel_timer_manager, 0, bootsel_poll_period_ms);
 }
 
 void bootsel_init(uint32_t poll_period_ms, bootsel_poll_callback_t callback) {
@@ -62,7 +61,7 @@ void bootsel_init(uint32_t poll_period_ms, bootsel_poll_callback_t callback) {
     bootsel_callback = callback;
     bootsel_prev_pressed = false;
 
-    btstack_run_loop_set_timer_handler(&bootsel_timer, bootsel_timer_handler);
-    btstack_run_loop_set_timer(&bootsel_timer, poll_period_ms);
-    btstack_run_loop_add_timer(&bootsel_timer);
+    bootsel_timer_slot.callback = bootsel_timer_callback;
+    timer_manager_init(&bootsel_timer_manager, &bootsel_timer_slot, 1);
+    timer_manager_start(&bootsel_timer_manager, 0, poll_period_ms);
 }
