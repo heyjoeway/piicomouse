@@ -19,7 +19,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install ARM toolchain and build tools
         run: |
@@ -35,7 +35,7 @@ jobs:
 
       - name: Cache Pico SDK
         id: cache-sdk
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ github.workspace }}/pico-sdk
           key: pico-sdk-${{ env.PICO_SDK_VERSION }}
@@ -67,7 +67,7 @@ jobs:
         run: cmake --build build-${{ matrix.board }} --parallel
 
       - name: Upload UF2 artifact for ${{ matrix.board }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: piicomouse2-${{ matrix.board }}-${{ github.sha }}
           path: |
