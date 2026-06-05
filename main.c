@@ -14,10 +14,12 @@ static hid_state_t hid_state = {0};
 // Behavior profile: Default Wii Remote to HID mapping
 #define POINTER_GAIN_X 3.0f
 #define POINTER_GAIN_Y 1.25f
+#define NO_IR_ENTER_THRESHOLD_FRAMES 5
 
 static bool profile_pointer_prev_norm_valid;
 static uint16_t profile_pointer_prev_norm_x;
 static uint16_t profile_pointer_prev_norm_y;
+static uint8_t profile_pointer_no_ir_frames;
 
 static uint8_t profile_buttons_to_hat(uint16_t buttons) {
     bool up = (buttons & 0x0800u) != 0;
@@ -43,6 +45,7 @@ static uint8_t profile_buttons_to_hat(uint16_t buttons) {
 void profile_wiimote_default(wiimote_tracking_state_t *wiimote) {
     if (!hid_is_connected(&hid_state)) {
         profile_pointer_prev_norm_valid = false;
+        profile_pointer_no_ir_frames = 0;
         return;
     }
 
@@ -78,7 +81,20 @@ void profile_wiimote_default(wiimote_tracking_state_t *wiimote) {
     }
     hid_send_consumer_keycode(&hid_state, consumer_keycode);
 
+    if (wiimote->have_norm) {
+        profile_pointer_no_ir_frames = 0;
+    } else if (profile_pointer_no_ir_frames < NO_IR_ENTER_THRESHOLD_FRAMES) {
+        profile_pointer_no_ir_frames++;
+    }
+
+    bool a_maps_to_gamepad =
+        (hid_state.output_mode == HID_MODE_POINTER) &&
+        (profile_pointer_no_ir_frames >= NO_IR_ENTER_THRESHOLD_FRAMES);
+
     uint16_t gamepad_buttons = 0;
+    if ((wiimote->buttons & 0x0008u) && a_maps_to_gamepad) {
+        gamepad_buttons |= 0x0001u;
+    }
     uint8_t hat = profile_buttons_to_hat(wiimote->buttons);
     hid_set_gamepad_hat(&hid_state, hat, gamepad_buttons);
 
@@ -102,10 +118,15 @@ void profile_wiimote_default(wiimote_tracking_state_t *wiimote) {
             if (delta_y < -127) delta_y = -127;
             if (delta_y > 127) delta_y = 127;
 
-            hid_send_pointer_delta(&hid_state, (int8_t)delta_x, (int8_t)delta_y, (wiimote->buttons & 0x0008u) ? 0x01u : 0u);
+            hid_send_pointer_delta(
+                &hid_state,
+                (int8_t)delta_x,
+                (int8_t)delta_y,
+                ((wiimote->buttons & 0x0008u) && !a_maps_to_gamepad) ? 0x01u : 0u);
         }
     } else {
         profile_pointer_prev_norm_valid = false;
+        hid_send_pointer_delta(&hid_state, 0, 0, 0);
     }
 
     if (wiimote->buttons == 0) {
