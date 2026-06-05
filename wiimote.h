@@ -50,8 +50,13 @@ typedef struct {
 
 // Behavior profile: translates Wii Remote input to HID commands
 typedef void (*wiimote_behavior_profile_t)(wiimote_tracking_state_t *wiimote);
+typedef void (*wiimote_sync_pair_callback_t)(void);
 
 void wiimote_init_state(wiimote_tracking_state_t *wiimote_state, wiimote_behavior_profile_t profile);
+void wiimote_set_behavior_profile(wiimote_behavior_profile_t profile);
+void wiimote_set_sync_pair_callback(wiimote_sync_pair_callback_t callback);
+bool wiimote_load_persisted_profile_id(uint8_t *profile_id_out);
+bool wiimote_save_persisted_profile_id(uint8_t profile_id);
 void wiimote_enter_sync_mode(void);
 
 

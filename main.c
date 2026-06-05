@@ -14,6 +14,19 @@
 static wiimote_tracking_state_t wiimote_state = {0};
 static hid_state_t hid_state = {0};
 
+typedef enum {
+    APP_PROFILE_WIIMOTE_DEFAULT = 0,
+    APP_PROFILE_WIIMOTE_TEST2,
+    APP_PROFILE_WIIMOTE_TEST3,
+    APP_PROFILE_WIIMOTE_TEST4,
+    APP_PROFILE_COUNT,
+} app_profile_id_t;
+
+typedef struct {
+    const char *name;
+    wiimote_behavior_profile_t handler;
+} app_profile_entry_t;
+
 // Behavior profile: Default Wii Remote to HID mapping
 #define POINTER_GAIN_X 3.0f
 #define POINTER_GAIN_Y 1.25f
@@ -23,6 +36,92 @@ static bool profile_pointer_prev_norm_valid;
 static uint16_t profile_pointer_prev_norm_x;
 static uint16_t profile_pointer_prev_norm_y;
 static uint8_t profile_pointer_no_ir_frames;
+static app_profile_id_t active_profile_id = APP_PROFILE_WIIMOTE_DEFAULT;
+
+static void profile_wiimote_default(wiimote_tracking_state_t *wiimote);
+static void profile_wiimote_test2(wiimote_tracking_state_t *wiimote);
+static void profile_wiimote_test3(wiimote_tracking_state_t *wiimote);
+static void profile_wiimote_test4(wiimote_tracking_state_t *wiimote);
+
+static const app_profile_entry_t app_profiles[APP_PROFILE_COUNT] = {
+    [APP_PROFILE_WIIMOTE_DEFAULT] = {.name = "profile_wiimote_default", .handler = profile_wiimote_default},
+    [APP_PROFILE_WIIMOTE_TEST2] = {.name = "profile_wiimote_test2", .handler = profile_wiimote_test2},
+    [APP_PROFILE_WIIMOTE_TEST3] = {.name = "profile_wiimote_test3", .handler = profile_wiimote_test3},
+    [APP_PROFILE_WIIMOTE_TEST4] = {.name = "profile_wiimote_test4", .handler = profile_wiimote_test4},
+};
+
+static void reset_profile_runtime_state(void) {
+    profile_pointer_prev_norm_valid = false;
+    profile_pointer_prev_norm_x = 0;
+    profile_pointer_prev_norm_y = 0;
+    profile_pointer_no_ir_frames = 0;
+    wiimote_state.previous_buttons_hid_mode = wiimote_state.buttons;
+    hid_reset_output_state(&hid_state);
+    hid_send_consumer_keycode(&hid_state, 0);
+    hid_set_gamepad_hat(&hid_state, 0x08u, 0);
+    hid_send_pointer_delta(&hid_state, 0, 0, 0);
+}
+
+static void set_active_profile(app_profile_id_t profile_id, bool persist) {
+    bool saved = true;
+
+    if (profile_id >= APP_PROFILE_COUNT) {
+        return;
+    }
+
+    if (profile_id != active_profile_id) {
+        active_profile_id = profile_id;
+        wiimote_set_behavior_profile(app_profiles[profile_id].handler);
+        reset_profile_runtime_state();
+    }
+
+    if (persist) {
+        saved = wiimote_save_persisted_profile_id((uint8_t)profile_id);
+    }
+
+    printf("Active profile: %s%s\n",
+           app_profiles[profile_id].name,
+           persist ? (saved ? " (saved)" : " (save failed)") : "");
+}
+
+static void handle_sync_pair_complete(void) {
+    set_active_profile(APP_PROFILE_WIIMOTE_DEFAULT, true);
+}
+
+static bool handle_profile_selection_hotkeys(wiimote_tracking_state_t *wiimote) {
+    const uint16_t buttons = wiimote->buttons;
+    const uint16_t changed = buttons ^ wiimote->previous_buttons;
+    const bool home_down = (buttons & 0x0080u) != 0;
+    const bool dpad_down = (buttons & (0x0800u | 0x0400u | 0x0100u | 0x0200u)) != 0;
+    app_profile_id_t selected_profile = APP_PROFILE_COUNT;
+
+    if (home_down) {
+        if ((changed & 0x0800u) && (buttons & 0x0800u)) {
+            selected_profile = APP_PROFILE_WIIMOTE_DEFAULT;
+        } else if ((changed & 0x0400u) && (buttons & 0x0400u)) {
+            selected_profile = APP_PROFILE_WIIMOTE_TEST2;
+        } else if ((changed & 0x0100u) && (buttons & 0x0100u)) {
+            selected_profile = APP_PROFILE_WIIMOTE_TEST3;
+        } else if ((changed & 0x0200u) && (buttons & 0x0200u)) {
+            selected_profile = APP_PROFILE_WIIMOTE_TEST4;
+        }
+    }
+
+    wiimote->previous_buttons = buttons;
+
+    if (selected_profile < APP_PROFILE_COUNT) {
+        set_active_profile(selected_profile, true);
+    }
+
+    if (home_down && dpad_down) {
+        hid_send_consumer_keycode(&hid_state, 0);
+        hid_set_gamepad_hat(&hid_state, 0x08u, 0);
+        hid_send_pointer_delta(&hid_state, 0, 0, 0);
+        return true;
+    }
+
+    return false;
+}
 
 static uint8_t profile_buttons_to_hat(uint16_t buttons) {
     bool up = (buttons & 0x0800u) != 0;
@@ -50,7 +149,11 @@ static void bootsel_poll_callback(bool pressed, bool changed) {
     if (pressed) wiimote_enter_sync_mode();
 }
 
-void profile_wiimote_default(wiimote_tracking_state_t *wiimote) {
+static void profile_wiimote_default(wiimote_tracking_state_t *wiimote) {
+    if (handle_profile_selection_hotkeys(wiimote)) {
+        return;
+    }
+
     if (!hid_is_connected(&hid_state)) {
         profile_pointer_prev_norm_valid = false;
         profile_pointer_no_ir_frames = 0;
@@ -142,7 +245,27 @@ void profile_wiimote_default(wiimote_tracking_state_t *wiimote) {
     }
 }
 
+static void profile_wiimote_test2(wiimote_tracking_state_t *wiimote) {
+    if (handle_profile_selection_hotkeys(wiimote)) {
+        return;
+    }
+}
+
+static void profile_wiimote_test3(wiimote_tracking_state_t *wiimote) {
+    if (handle_profile_selection_hotkeys(wiimote)) {
+        return;
+    }
+}
+
+static void profile_wiimote_test4(wiimote_tracking_state_t *wiimote) {
+    if (handle_profile_selection_hotkeys(wiimote)) {
+        return;
+    }
+}
+
 int main(void) {
+    uint8_t persisted_profile_id = (uint8_t)APP_PROFILE_WIIMOTE_DEFAULT;
+
     stdio_init_all();
     sleep_ms(1500);
 
@@ -156,7 +279,15 @@ int main(void) {
 
     bootsel_init(BOOTSEL_POLL_PERIOD_MS, bootsel_poll_callback);
     hid_init(&hid_state);
-    wiimote_init_state(&wiimote_state, profile_wiimote_default);
+
+    if (wiimote_load_persisted_profile_id(&persisted_profile_id) &&
+        persisted_profile_id < (uint8_t)APP_PROFILE_COUNT) {
+        active_profile_id = (app_profile_id_t)persisted_profile_id;
+    }
+
+    printf("Boot profile: %s\n", app_profiles[active_profile_id].name);
+    wiimote_init_state(&wiimote_state, app_profiles[active_profile_id].handler);
+    wiimote_set_sync_pair_callback(handle_sync_pair_complete);
 
     hci_power_control(HCI_POWER_ON);
     btstack_run_loop_execute();

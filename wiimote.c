@@ -33,6 +33,8 @@ bool tud_mounted(void);
 #define BT_RESET_POWER_ON_DELAY_MS 600
 #define TARGET_ADDR_STORE_MAGIC 0x574D4143u
 #define TARGET_ADDR_STORE_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
+#define WIIMOTE_SETTINGS_FLAG_TARGET_ADDR_VALID 0x01u
+#define WIIMOTE_SETTINGS_FLAG_PROFILE_VALID 0x02u
 #define WIIMOTE_DISCONNECT_REASON_REMOTE_USER_TERMINATED 0x13
 #define WIIMOTE_DISCONNECT_REASON_POWER_OFF 0x15
 
@@ -90,9 +92,10 @@ static const char *nintendo_addr_prefixes[] = {
 typedef struct {
     uint32_t magic;
     uint8_t addr[6];
-    uint8_t reserved[2];
+    uint8_t profile_id;
+    uint8_t flags;
     uint32_t checksum;
-} target_addr_store_t;
+} wiimote_settings_store_t;
 
 static const char *wii_name_prefix = "Nintendo RVL-CNT-01";
 
@@ -133,6 +136,7 @@ static uint16_t inactivity_prev_norm_x = 0;
 static uint16_t inactivity_prev_norm_y = 0;
 static bool onboard_led_on = false;
 static wiimote_behavior_profile_t g_behavior_profile = NULL;
+static wiimote_sync_pair_callback_t g_sync_pair_callback = NULL;
 
 static void set_onboard_led(bool on) {
     if (onboard_led_on == on) {
@@ -142,7 +146,7 @@ static void set_onboard_led(bool on) {
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, on ? 1 : 0);
 }
 
-static uint32_t target_addr_checksum(const uint8_t addr[6]) {
+static uint32_t legacy_target_addr_checksum(const uint8_t addr[6]) {
     uint32_t checksum = TARGET_ADDR_STORE_MAGIC;
     for (int i = 0; i < 6; i++) {
         checksum = (checksum << 5) ^ (checksum >> 2) ^ addr[i];
@@ -150,41 +154,121 @@ static uint32_t target_addr_checksum(const uint8_t addr[6]) {
     return checksum;
 }
 
-static bool load_persisted_target_addr(bd_addr_t addr_out) {
+static uint32_t wiimote_settings_checksum(const wiimote_settings_store_t *stored) {
+    uint32_t checksum = TARGET_ADDR_STORE_MAGIC;
+
+    for (int i = 0; i < 6; i++) {
+        checksum = (checksum << 5) ^ (checksum >> 2) ^ stored->addr[i];
+    }
+
+    checksum = (checksum << 5) ^ (checksum >> 2) ^ stored->profile_id;
+    checksum = (checksum << 5) ^ (checksum >> 2) ^ stored->flags;
+    return checksum;
+}
+
+static bool load_persisted_settings(wiimote_settings_store_t *stored_out) {
     const uint8_t *flash_ptr = (const uint8_t *)(XIP_BASE + TARGET_ADDR_STORE_OFFSET);
-    const target_addr_store_t *stored = (const target_addr_store_t *)flash_ptr;
+    const wiimote_settings_store_t *stored = (const wiimote_settings_store_t *)flash_ptr;
 
     if (stored->magic != TARGET_ADDR_STORE_MAGIC) {
         return false;
     }
-    if (stored->checksum != target_addr_checksum(stored->addr)) {
-        return false;
+
+    if (stored->checksum == wiimote_settings_checksum(stored)) {
+        *stored_out = *stored;
+        return true;
     }
 
-    memcpy(addr_out, stored->addr, sizeof(bd_addr_t));
-    return true;
+    if (stored->checksum == legacy_target_addr_checksum(stored->addr)) {
+        *stored_out = *stored;
+        stored_out->profile_id = 0;
+        stored_out->flags = WIIMOTE_SETTINGS_FLAG_TARGET_ADDR_VALID;
+        return true;
+    }
+
+    return false;
 }
 
-static bool save_persisted_target_addr(const bd_addr_t addr) {
-    target_addr_store_t stored = {0};
+static bool save_persisted_settings(const wiimote_settings_store_t *stored) {
     uint8_t sector_buf[FLASH_SECTOR_SIZE];
 
     memset(sector_buf, 0xFF, sizeof(sector_buf));
-    stored.magic = TARGET_ADDR_STORE_MAGIC;
-    memcpy(stored.addr, addr, sizeof(bd_addr_t));
-    stored.checksum = target_addr_checksum(stored.addr);
-    memcpy(sector_buf, &stored, sizeof(stored));
+    memcpy(sector_buf, stored, sizeof(*stored));
 
     uint32_t flags = save_and_disable_interrupts();
     flash_range_erase(TARGET_ADDR_STORE_OFFSET, FLASH_SECTOR_SIZE);
     flash_range_program(TARGET_ADDR_STORE_OFFSET, sector_buf, FLASH_SECTOR_SIZE);
     restore_interrupts(flags);
 
+    wiimote_settings_store_t verify;
+    if (!load_persisted_settings(&verify)) {
+        return false;
+    }
+
+    return memcmp(&verify, stored, sizeof(*stored)) == 0;
+}
+
+static bool load_persisted_target_addr(bd_addr_t addr_out) {
+    wiimote_settings_store_t stored;
+
+    if (!load_persisted_settings(&stored)) {
+        return false;
+    }
+
+    if ((stored.flags & WIIMOTE_SETTINGS_FLAG_TARGET_ADDR_VALID) == 0) {
+        return false;
+    }
+
+    memcpy(addr_out, stored.addr, sizeof(bd_addr_t));
+    return true;
+}
+
+static bool save_persisted_target_addr(const bd_addr_t addr) {
+    wiimote_settings_store_t stored = {0};
+
+    load_persisted_settings(&stored);
+    stored.magic = TARGET_ADDR_STORE_MAGIC;
+    memcpy(stored.addr, addr, sizeof(bd_addr_t));
+    stored.flags |= WIIMOTE_SETTINGS_FLAG_TARGET_ADDR_VALID;
+    stored.checksum = wiimote_settings_checksum(&stored);
+
     bd_addr_t verify_addr;
-    if (!load_persisted_target_addr(verify_addr)) {
+    if (!save_persisted_settings(&stored) || !load_persisted_target_addr(verify_addr)) {
         return false;
     }
     return bd_addr_cmp(verify_addr, addr) == 0;
+}
+
+bool wiimote_load_persisted_profile_id(uint8_t *profile_id_out) {
+    wiimote_settings_store_t stored;
+
+    if (profile_id_out == NULL || !load_persisted_settings(&stored)) {
+        return false;
+    }
+
+    if ((stored.flags & WIIMOTE_SETTINGS_FLAG_PROFILE_VALID) == 0) {
+        return false;
+    }
+
+    *profile_id_out = stored.profile_id;
+    return true;
+}
+
+bool wiimote_save_persisted_profile_id(uint8_t profile_id) {
+    wiimote_settings_store_t stored = {0};
+    uint8_t verify_profile_id = 0;
+
+    load_persisted_settings(&stored);
+    stored.magic = TARGET_ADDR_STORE_MAGIC;
+    stored.profile_id = profile_id;
+    stored.flags |= WIIMOTE_SETTINGS_FLAG_PROFILE_VALID;
+    stored.checksum = wiimote_settings_checksum(&stored);
+
+    if (!save_persisted_settings(&stored) || !wiimote_load_persisted_profile_id(&verify_profile_id)) {
+        return false;
+    }
+
+    return verify_profile_id == profile_id;
 }
 
 static bool addr_is_nintendo_prefix(const bd_addr_t addr) {
@@ -769,31 +853,6 @@ static void parse_wiimote_ir_extended(wiimote_tracking_state_t *state, const uin
     }
 }
 
-static void handle_ir_profile_hotkeys(wiimote_tracking_state_t *state, uint16_t buttons) {
-    uint16_t changed = buttons ^ state->previous_buttons;
-    bool home_down = (buttons & 0x0080u) != 0;
-
-    if (!home_down) {
-        state->previous_buttons = buttons;
-        return;
-    }
-
-    if ((changed & 0x0800u) && (buttons & 0x0800u)) {
-        select_ir_sensitivity_profile(state, (uint8_t)(state->ir_sensitivity_index + 1));
-        if (hid_is_connected(g_hid_state)) {
-            request_wiimote_ir_report(state);
-        }
-    } else if ((changed & 0x0400u) && (buttons & 0x0400u)) {
-        const uint8_t profile_count = (uint8_t)(sizeof(wiimote_ir_profiles) / sizeof(wiimote_ir_profiles[0]));
-        select_ir_sensitivity_profile(state, (uint8_t)((state->ir_sensitivity_index + profile_count - 1) % profile_count));
-        if (hid_is_connected(g_hid_state)) {
-            request_wiimote_ir_report(state);
-        }
-    }
-
-    state->previous_buttons = buttons;
-}
-
 static void reset_inactivity_timer(uint16_t buttons) {
     if (!hid_is_connected(g_hid_state)) return;
     if (buttons == inactivity_prev_buttons) return;
@@ -1191,6 +1250,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                         printf("Sync mode paired with %s (%s)\n",
                                bd_addr_to_str(connected_addr),
                                saved ? "saved" : "save failed");
+                        if (g_sync_pair_callback != NULL) {
+                            g_sync_pair_callback();
+                        }
                         sync_mode_active = false;
                         timer_manager_stop(&wiimote_timer_manager, WIIMOTE_TIMER_SYNC_MODE_TIMEOUT);
                         timer_manager_stop(&wiimote_timer_manager, WIIMOTE_TIMER_SYNC_MODE_FLASH);
@@ -1319,4 +1381,12 @@ void wiimote_init_state(wiimote_tracking_state_t *wiimote_state, wiimote_behavio
     wiimote_timer_slots[WIIMOTE_TIMER_SYNC_MODE_FLASH].callback = sync_mode_flash_timer_handler;
 
     timer_manager_init(&wiimote_timer_manager, wiimote_timer_slots, WIIMOTE_TIMER_COUNT);
+}
+
+void wiimote_set_behavior_profile(wiimote_behavior_profile_t profile) {
+    g_behavior_profile = profile;
+}
+
+void wiimote_set_sync_pair_callback(wiimote_sync_pair_callback_t callback) {
+    g_sync_pair_callback = callback;
 }
