@@ -31,12 +31,41 @@ typedef struct {
 #define POINTER_GAIN_X 3.0f
 #define POINTER_GAIN_Y 1.25f
 #define NO_IR_ENTER_THRESHOLD_FRAMES 5
+#define WIIMOTE_BUTTON_MASK 0x1F9Fu
+#define WIIMOTE_HOME_MASK 0x0080u
 
 static bool profile_pointer_prev_norm_valid;
 static uint16_t profile_pointer_prev_norm_x;
 static uint16_t profile_pointer_prev_norm_y;
 static uint8_t profile_pointer_no_ir_frames;
+static bool profile_home_tap_candidate;
+static bool profile_home_tap_prev_down;
+static bool profile_home_tap_press_pending;
+static bool profile_home_tap_release_pending;
 static app_profile_id_t active_profile_id = APP_PROFILE_WIIMOTE_DEFAULT;
+
+static void profile_update_home_tap_state(uint16_t buttons) {
+    bool home_down = (buttons & WIIMOTE_HOME_MASK) != 0;
+    bool non_home_down = (buttons & (WIIMOTE_BUTTON_MASK & ~WIIMOTE_HOME_MASK)) != 0;
+
+    if (home_down && !profile_home_tap_prev_down) {
+        profile_home_tap_candidate = !non_home_down;
+    }
+
+    if (home_down && non_home_down) {
+        profile_home_tap_candidate = false;
+    }
+
+    if (!home_down && profile_home_tap_prev_down) {
+        if (profile_home_tap_candidate) {
+            profile_home_tap_press_pending = true;
+            profile_home_tap_release_pending = false;
+        }
+        profile_home_tap_candidate = false;
+    }
+
+    profile_home_tap_prev_down = home_down;
+}
 
 static void profile_wiimote_default(wiimote_tracking_state_t *wiimote);
 static void profile_wiimote_test2(wiimote_tracking_state_t *wiimote);
@@ -55,6 +84,10 @@ static void reset_profile_runtime_state(void) {
     profile_pointer_prev_norm_x = 0;
     profile_pointer_prev_norm_y = 0;
     profile_pointer_no_ir_frames = 0;
+    profile_home_tap_candidate = false;
+    profile_home_tap_prev_down = false;
+    profile_home_tap_press_pending = false;
+    profile_home_tap_release_pending = false;
     wiimote_state.previous_buttons_hid_mode = wiimote_state.buttons;
     hid_reset_output_state(&hid_state);
     hid_send_consumer_keycode(&hid_state, 0);
@@ -150,6 +183,8 @@ static void bootsel_poll_callback(bool pressed, bool changed) {
 }
 
 static void profile_wiimote_default(wiimote_tracking_state_t *wiimote) {
+    profile_update_home_tap_state(wiimote->buttons);
+
     if (handle_profile_selection_hotkeys(wiimote)) {
         return;
     }
@@ -176,11 +211,16 @@ static void profile_wiimote_default(wiimote_tracking_state_t *wiimote) {
     }
 
     uint16_t consumer_keycode = 0;
-    bool home_down = (wiimote->buttons & 0x0080u) != 0;
-    if (home_down && (wiimote->buttons & 0x0004u)) {
-        consumer_keycode = 0x00B5;
-    } else if (home_down) {
+    bool home_down = (wiimote->buttons & WIIMOTE_HOME_MASK) != 0;
+    if (profile_home_tap_press_pending) {
         consumer_keycode = 0x0223;
+        profile_home_tap_press_pending = false;
+        profile_home_tap_release_pending = true;
+    } else if (profile_home_tap_release_pending) {
+        consumer_keycode = 0;
+        profile_home_tap_release_pending = false;
+    } else if (home_down && (wiimote->buttons & 0x0004u)) {
+        consumer_keycode = 0x00B5;
     } else if (wiimote->buttons & 0x0010u) {
         consumer_keycode = 0x0224;
     } else if (wiimote->buttons & 0x0002u) {
