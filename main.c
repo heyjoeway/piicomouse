@@ -236,22 +236,12 @@ static void profile_wiimote_default(wiimote_tracking_state_t *wiimote) {
         return;
     }
     
-    hid_set_output_mode(&hid_state, HID_MODE_POINTER);
+    hid_set_output_mode(&hid_state, HID_MODE_DIGITIZER);
 
     uint16_t changed = wiimote->buttons ^ wiimote->previous_buttons_hid_mode;
     bool b_down = (wiimote->buttons & WIIMOTE_BTN_B) != 0;
 
-    if (!b_down) {
-        wiimote->previous_buttons_hid_mode = wiimote->buttons;
-    } else if ((changed & WIIMOTE_BTN_1) && (wiimote->buttons & WIIMOTE_BTN_1)) {
-        hid_set_output_mode(&hid_state, HID_MODE_POINTER);
-        wiimote->previous_buttons_hid_mode = wiimote->buttons;
-    } else if ((changed & WIIMOTE_BTN_2) && (wiimote->buttons & WIIMOTE_BTN_2)) {
-        hid_set_output_mode(&hid_state, HID_MODE_DIGITIZER);
-        wiimote->previous_buttons_hid_mode = wiimote->buttons;
-    } else {
-        wiimote->previous_buttons_hid_mode = wiimote->buttons;
-    }
+    wiimote->previous_buttons_hid_mode = wiimote->buttons;
 
     uint16_t consumer_keycode = 0;
     bool home_down = (wiimote->buttons & WIIMOTE_BTN_HOME) != 0;
@@ -281,50 +271,55 @@ static void profile_wiimote_default(wiimote_tracking_state_t *wiimote) {
         profile_pointer_no_ir_frames++;
     }
 
-    bool a_maps_to_gamepad =
-        (hid_state.output_mode == HID_MODE_POINTER) &&
-        (profile_pointer_no_ir_frames >= NO_IR_ENTER_THRESHOLD_FRAMES);
+    bool a_maps_to_gamepad = (
+        profile_pointer_no_ir_frames
+        >= NO_IR_ENTER_THRESHOLD_FRAMES
+    );
 
     uint16_t gamepad_buttons = 0;
-    if ((wiimote->buttons & WIIMOTE_BTN_A) && a_maps_to_gamepad) {
+    bool wiimote_a_down = (wiimote->buttons & WIIMOTE_BTN_A) != 0;    
+    bool wiimote_b_down = (wiimote->buttons & WIIMOTE_BTN_B) != 0;    
+    if (wiimote_a_down && a_maps_to_gamepad) {
         gamepad_buttons |= GAMEPAD_BTN_A;
     }
     uint8_t hat = profile_buttons_to_hat(wiimote->buttons);
     hid_set_gamepad_hat(&hid_state, hat, gamepad_buttons);
 
     if (wiimote->have_norm) {
-        if (!profile_pointer_prev_norm_valid) {
-            profile_pointer_prev_norm_valid = true;
-            profile_pointer_prev_norm_x = wiimote->norm_x;
-            profile_pointer_prev_norm_y = wiimote->norm_y;
-        } else {
-            int32_t delta_x = (int32_t)wiimote->norm_x - (int32_t)profile_pointer_prev_norm_x;
-            int32_t delta_y = (int32_t)wiimote->norm_y - (int32_t)profile_pointer_prev_norm_y;
+        uint16_t mapped_x = (uint16_t)(WIIMOTE_NORM_MAX - wiimote->norm_x);
 
-            profile_pointer_prev_norm_x = wiimote->norm_x;
-            profile_pointer_prev_norm_y = wiimote->norm_y;
-
-            delta_x = -delta_x * POINTER_GAIN_X;
-            delta_y = delta_y * POINTER_GAIN_Y;
-
-            if (delta_x < -127) delta_x = -127;
-            if (delta_x > 127) delta_x = 127;
-            if (delta_y < -127) delta_y = -127;
-            if (delta_y > 127) delta_y = 127;
-
-            hid_send_pointer_delta(
+        if (wiimote_a_down && !wiimote_b_down) {
+            hid_send_digitizer_position(
                 &hid_state,
-                (int8_t)delta_x,
-                (int8_t)delta_y,
-                ((wiimote->buttons & WIIMOTE_BTN_A) && !a_maps_to_gamepad) ? 0x01u : 0u);
+                profile_pen_last_x,
+                profile_pen_last_y,
+                true,
+                wiimote_a_down && !a_maps_to_gamepad,
+                false
+            );
+        } else {
+            profile_pen_last_valid = true;
+            profile_pen_last_x = mapped_x;
+            profile_pen_last_y = wiimote->norm_y;
+            hid_send_digitizer_position(
+                &hid_state,
+                mapped_x,
+                wiimote->norm_y,
+                true,
+                wiimote_a_down && !a_maps_to_gamepad,
+                false
+            );
         }
     } else {
-        profile_pointer_prev_norm_valid = false;
-        hid_send_pointer_delta(&hid_state, 0, 0, 0);
-    }
-
-    if (wiimote->buttons == 0) {
-        hid_send_pointer_delta(&hid_state, 0, 0, 0);
+        if (profile_pen_last_valid) {
+            hid_send_digitizer_position(&hid_state,
+                                        profile_pen_last_x,
+                                        profile_pen_last_y,
+                                        false,
+                                        false,
+                                        false);
+            profile_pen_last_valid = false;
+        }
     }
 }
 
