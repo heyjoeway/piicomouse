@@ -71,7 +71,7 @@ jobs:
         with:
           name: piicomouse2-${{ matrix.board }}-${{ github.sha }}
           path: |
-            build-${{ matrix.board }}/piicomouse2-*.uf2
-            build-${{ matrix.board }}/piicomouse2-*.dis
+            build-${{ matrix.board }}/piicomouse2*.uf2
+            build-${{ matrix.board }}/piicomouse2*.dis
           if-no-files-found: error
           retention-days: 90

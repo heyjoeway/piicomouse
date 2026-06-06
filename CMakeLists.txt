@@ -41,15 +41,7 @@ pico_sdk_init()
 
 add_executable(piicomouse2 main.c wiimote.c hid.c bootsel.c timer.c usb_descriptors.c)
 
-if(PICO_BOARD STREQUAL "pico_w")
-    pico_set_program_name(piicomouse2 "piicomouse2-rp2040")
-    set_target_properties(piicomouse2 PROPERTIES OUTPUT_NAME piicomouse2-rp2040)
-elseif(PICO_BOARD STREQUAL "pico2_w")
-    pico_set_program_name(piicomouse2 "piicomouse2-rp2350")
-    set_target_properties(piicomouse2 PROPERTIES OUTPUT_NAME piicomouse2-rp2350)
-else()
-    pico_set_program_name(piicomouse2 "piicomouse2")
-endif()
+pico_set_program_name(piicomouse2 "piicomouse2")
 pico_set_program_version(piicomouse2 "0.1")
 
 # Modify the below lines to enable/disable output over UART/USB
