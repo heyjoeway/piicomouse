@@ -10,6 +10,37 @@
 
 #define BOOTSEL_POLL_PERIOD_MS 1000
 
+#define HID_CONSUMER_AC_VOLUME_UP   0xE9
+#define HID_CONSUMER_AC_VOLUME_DOWN 0xEA
+#define HID_CONSUMER_AC_MUTE        0xE2
+#define HID_CONSUMER_AC_HOME        0x0223
+#define HID_CONSUMER_AC_BACK        0x0224
+#define HID_CONSUMER_TV_INPUT       0x00B5
+
+#define WIIMOTE_BTN_1       0x0002u
+#define WIIMOTE_BTN_2       0x0001u
+#define WIIMOTE_BTN_PLUS    0x1000u
+#define WIIMOTE_BTN_MINUS   0x0010u
+#define WIIMOTE_BTN_A       0x0008u
+#define WIIMOTE_BTN_B       0x0004u
+#define WIIMOTE_BTN_HOME    0x0080u
+#define WIIMOTE_BTN_UP      0x0800u
+#define WIIMOTE_BTN_DOWN    0x0400u
+#define WIIMOTE_BTN_LEFT    0x0100u
+#define WIIMOTE_BTN_RIGHT   0x0200u
+#define WIIMOTE_BUTTON_MASK 0x1F9Fu
+
+#define GAMEPAD_BTN_A          1
+#define GAMEPAD_HAT_NEUTRAL    8
+#define GAMEPAD_HAT_UP         0
+#define GAMEPAD_HAT_UP_RIGHT   1
+#define GAMEPAD_HAT_UP_LEFT    7
+#define GAMEPAD_HAT_DOWN       4
+#define GAMEPAD_HAT_DOWN_RIGHT 3
+#define GAMEPAD_HAT_DOWN_LEFT  5
+#define GAMEPAD_HAT_LEFT       6
+#define GAMEPAD_HAT_RIGHT      2
+
 // Global state objects
 static wiimote_tracking_state_t wiimote_state = {0};
 static hid_state_t hid_state = {0};
@@ -32,8 +63,6 @@ typedef struct {
 #define POINTER_GAIN_Y 1.25f
 #define NO_IR_ENTER_THRESHOLD_FRAMES 5
 #define WIIMOTE_NORM_MAX 1000u
-#define WIIMOTE_BUTTON_MASK 0x1F9Fu
-#define WIIMOTE_HOME_MASK 0x0080u
 
 static bool profile_pointer_prev_norm_valid;
 static uint16_t profile_pointer_prev_norm_x;
@@ -49,8 +78,8 @@ static bool profile_home_tap_release_pending;
 static app_profile_id_t active_profile_id = APP_PROFILE_WIIMOTE_DEFAULT;
 
 static void profile_update_home_tap_state(uint16_t buttons) {
-    bool home_down = (buttons & WIIMOTE_HOME_MASK) != 0;
-    bool non_home_down = (buttons & (WIIMOTE_BUTTON_MASK & ~WIIMOTE_HOME_MASK)) != 0;
+    bool home_down = (buttons & WIIMOTE_BTN_HOME) != 0;
+    bool non_home_down = (buttons & (WIIMOTE_BUTTON_MASK & ~WIIMOTE_BTN_HOME)) != 0;
 
     if (home_down && !profile_home_tap_prev_down) {
         profile_home_tap_candidate = !non_home_down;
@@ -98,7 +127,7 @@ static void reset_profile_runtime_state(void) {
     wiimote_state.previous_buttons_hid_mode = wiimote_state.buttons;
     hid_reset_output_state(&hid_state);
     hid_send_consumer_keycode(&hid_state, 0);
-    hid_set_gamepad_hat(&hid_state, 0x08u, 0);
+    hid_set_gamepad_hat(&hid_state, GAMEPAD_HAT_NEUTRAL, 0);
     hid_send_pointer_delta(&hid_state, 0, 0, 0);
 }
 
@@ -131,18 +160,23 @@ static void handle_sync_pair_complete(void) {
 static bool handle_profile_selection_hotkeys(wiimote_tracking_state_t *wiimote) {
     const uint16_t buttons = wiimote->buttons;
     const uint16_t changed = buttons ^ wiimote->previous_buttons;
-    const bool home_down = (buttons & 0x0080u) != 0;
-    const bool dpad_down = (buttons & (0x0800u | 0x0400u | 0x0100u | 0x0200u)) != 0;
+    const bool home_down = (buttons & WIIMOTE_BTN_HOME) != 0;
+    const bool dpad_down = (buttons & (
+        WIIMOTE_BTN_UP
+        | WIIMOTE_BTN_DOWN
+        | WIIMOTE_BTN_LEFT
+        | WIIMOTE_BTN_RIGHT
+    )) != 0;
     app_profile_id_t selected_profile = APP_PROFILE_COUNT;
 
     if (home_down) {
-        if ((changed & 0x0800u) && (buttons & 0x0800u)) {
+        if ((changed & WIIMOTE_BTN_UP) && (buttons & WIIMOTE_BTN_UP)) {
             selected_profile = APP_PROFILE_WIIMOTE_DEFAULT;
-        } else if ((changed & 0x0400u) && (buttons & 0x0400u)) {
+        } else if ((changed & WIIMOTE_BTN_DOWN) && (buttons & WIIMOTE_BTN_DOWN)) {
             selected_profile = APP_PROFILE_WIIMOTE_TEST2;
-        } else if ((changed & 0x0100u) && (buttons & 0x0100u)) {
+        } else if ((changed & WIIMOTE_BTN_LEFT) && (buttons & WIIMOTE_BTN_LEFT)) {
             selected_profile = APP_PROFILE_WIIMOTE_TEST3;
-        } else if ((changed & 0x0200u) && (buttons & 0x0200u)) {
+        } else if ((changed & WIIMOTE_BTN_RIGHT) && (buttons & WIIMOTE_BTN_RIGHT)) {
             selected_profile = APP_PROFILE_WIIMOTE_TEST4;
         }
     }
@@ -155,7 +189,7 @@ static bool handle_profile_selection_hotkeys(wiimote_tracking_state_t *wiimote) 
 
     if (home_down && dpad_down) {
         hid_send_consumer_keycode(&hid_state, 0);
-        hid_set_gamepad_hat(&hid_state, 0x08u, 0);
+        hid_set_gamepad_hat(&hid_state, GAMEPAD_HAT_NEUTRAL, 0);
         hid_send_pointer_delta(&hid_state, 0, 0, 0);
         return true;
     }
@@ -164,24 +198,24 @@ static bool handle_profile_selection_hotkeys(wiimote_tracking_state_t *wiimote) 
 }
 
 static uint8_t profile_buttons_to_hat(uint16_t buttons) {
-    bool up = (buttons & 0x0800u) != 0;
-    bool down = (buttons & 0x0400u) != 0;
-    bool left = (buttons & 0x0100u) != 0;
-    bool right = (buttons & 0x0200u) != 0;
+    bool up = (buttons & WIIMOTE_BTN_UP) != 0;
+    bool down = (buttons & WIIMOTE_BTN_DOWN) != 0;
+    bool left = (buttons & WIIMOTE_BTN_LEFT) != 0;
+    bool right = (buttons & WIIMOTE_BTN_RIGHT) != 0;
 
     if (up && !down) {
-        if (left && !right) return 7;
-        if (right && !left) return 1;
-        return 0;
+        if (left && !right) return GAMEPAD_HAT_UP_LEFT;
+        if (right && !left) return GAMEPAD_HAT_UP_RIGHT;
+        return GAMEPAD_HAT_UP;
     }
     if (down && !up) {
-        if (left && !right) return 5;
-        if (right && !left) return 3;
-        return 4;
+        if (left && !right) return GAMEPAD_HAT_DOWN_LEFT;
+        if (right && !left) return GAMEPAD_HAT_DOWN_RIGHT;
+        return GAMEPAD_HAT_DOWN;
     }
-    if (left && !right) return 6;
-    if (right && !left) return 2;
-    return 0x08u;
+    if (left && !right) return GAMEPAD_HAT_LEFT;
+    if (right && !left) return GAMEPAD_HAT_RIGHT;
+    return GAMEPAD_HAT_NEUTRAL;
 }
 
 static void bootsel_poll_callback(bool pressed, bool changed) {
@@ -205,14 +239,14 @@ static void profile_wiimote_default(wiimote_tracking_state_t *wiimote) {
     hid_set_output_mode(&hid_state, HID_MODE_POINTER);
 
     uint16_t changed = wiimote->buttons ^ wiimote->previous_buttons_hid_mode;
-    bool b_down = (wiimote->buttons & 0x0004u) != 0;
+    bool b_down = (wiimote->buttons & WIIMOTE_BTN_B) != 0;
 
     if (!b_down) {
         wiimote->previous_buttons_hid_mode = wiimote->buttons;
-    } else if ((changed & 0x0002u) && (wiimote->buttons & 0x0002u)) {
+    } else if ((changed & WIIMOTE_BTN_1) && (wiimote->buttons & WIIMOTE_BTN_1)) {
         hid_set_output_mode(&hid_state, HID_MODE_POINTER);
         wiimote->previous_buttons_hid_mode = wiimote->buttons;
-    } else if ((changed & 0x0001u) && (wiimote->buttons & 0x0001u)) {
+    } else if ((changed & WIIMOTE_BTN_2) && (wiimote->buttons & WIIMOTE_BTN_2)) {
         hid_set_output_mode(&hid_state, HID_MODE_DIGITIZER);
         wiimote->previous_buttons_hid_mode = wiimote->buttons;
     } else {
@@ -220,24 +254,24 @@ static void profile_wiimote_default(wiimote_tracking_state_t *wiimote) {
     }
 
     uint16_t consumer_keycode = 0;
-    bool home_down = (wiimote->buttons & WIIMOTE_HOME_MASK) != 0;
+    bool home_down = (wiimote->buttons & WIIMOTE_BTN_HOME) != 0;
     if (profile_home_tap_press_pending) {
-        consumer_keycode = 0x0223;
+        consumer_keycode = HID_CONSUMER_AC_HOME;
         profile_home_tap_press_pending = false;
         profile_home_tap_release_pending = true;
     } else if (profile_home_tap_release_pending) {
         consumer_keycode = 0;
         profile_home_tap_release_pending = false;
-    } else if (home_down && (wiimote->buttons & 0x0004u)) {
-        consumer_keycode = 0x00B5;
-    } else if (wiimote->buttons & 0x0010u) {
-        consumer_keycode = 0x0224;
-    } else if (wiimote->buttons & 0x0002u) {
-        consumer_keycode = 0x00E9;
-    } else if (wiimote->buttons & 0x0001u) {
-        consumer_keycode = 0x00EA;
-    } else if (wiimote->buttons & 0x1000u) {
-        consumer_keycode = 0x00E2;
+    } else if (home_down && (wiimote->buttons & WIIMOTE_BTN_B)) {
+        consumer_keycode = HID_CONSUMER_TV_INPUT;
+    } else if (wiimote->buttons & WIIMOTE_BTN_MINUS) {
+        consumer_keycode = HID_CONSUMER_AC_BACK;
+    } else if (wiimote->buttons & WIIMOTE_BTN_1) {
+        consumer_keycode = HID_CONSUMER_AC_VOLUME_UP;
+    } else if (wiimote->buttons & WIIMOTE_BTN_2) {
+        consumer_keycode = HID_CONSUMER_AC_VOLUME_DOWN;
+    } else if (wiimote->buttons & WIIMOTE_BTN_PLUS) {
+        consumer_keycode = HID_CONSUMER_AC_MUTE;
     }
     hid_send_consumer_keycode(&hid_state, consumer_keycode);
 
@@ -252,8 +286,8 @@ static void profile_wiimote_default(wiimote_tracking_state_t *wiimote) {
         (profile_pointer_no_ir_frames >= NO_IR_ENTER_THRESHOLD_FRAMES);
 
     uint16_t gamepad_buttons = 0;
-    if ((wiimote->buttons & 0x0008u) && a_maps_to_gamepad) {
-        gamepad_buttons |= 0x0001u;
+    if ((wiimote->buttons & WIIMOTE_BTN_A) && a_maps_to_gamepad) {
+        gamepad_buttons |= GAMEPAD_BTN_A;
     }
     uint8_t hat = profile_buttons_to_hat(wiimote->buttons);
     hid_set_gamepad_hat(&hid_state, hat, gamepad_buttons);
@@ -282,7 +316,7 @@ static void profile_wiimote_default(wiimote_tracking_state_t *wiimote) {
                 &hid_state,
                 (int8_t)delta_x,
                 (int8_t)delta_y,
-                ((wiimote->buttons & 0x0008u) && !a_maps_to_gamepad) ? 0x01u : 0u);
+                ((wiimote->buttons & WIIMOTE_BTN_A) && !a_maps_to_gamepad) ? 0x01u : 0u);
         }
     } else {
         profile_pointer_prev_norm_valid = false;
@@ -307,8 +341,8 @@ static void profile_wiimote_test2(wiimote_tracking_state_t *wiimote) {
 
     if (wiimote->have_norm) {
         uint16_t mapped_x = (uint16_t)(WIIMOTE_NORM_MAX - wiimote->norm_x);
-        bool tip_down = (wiimote->buttons & 0x0008u) != 0;
-        bool barrel_switch = (wiimote->buttons & 0x0004u) != 0;
+        bool tip_down = (wiimote->buttons & WIIMOTE_BTN_A) != 0;
+        bool barrel_switch = (wiimote->buttons & WIIMOTE_BTN_B) != 0;
 
         profile_pen_last_valid = true;
         profile_pen_last_x = mapped_x;
