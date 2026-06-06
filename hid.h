@@ -54,6 +54,12 @@ void hid_queue_sleep_signal(hid_state_t *state);
 void hid_queue_wake_nudge(hid_state_t *state);
 void hid_set_output_mode(hid_state_t *state, hid_output_mode_t mode);
 void hid_send_pointer_delta(hid_state_t *state, int8_t dx, int8_t dy, uint8_t buttons);
+void hid_send_digitizer_position(hid_state_t *state,
+                                 uint16_t x,
+                                 uint16_t y,
+                                 bool in_range,
+                                 bool tip_down,
+                                 bool barrel_switch);
 void hid_set_gamepad_hat(hid_state_t *state, uint8_t hat, uint16_t buttons);
 void hid_send_consumer_keycode(hid_state_t *state, uint16_t keycode);
 

@@ -210,6 +210,28 @@ void hid_send_pointer_delta(hid_state_t *state, int8_t dx, int8_t dy, uint8_t bu
     send_raw_pointer_report(state, dx, dy, buttons);
 }
 
+void hid_send_digitizer_position(hid_state_t *state,
+                                 uint16_t x,
+                                 uint16_t y,
+                                 bool in_range,
+                                 bool tip_down,
+                                 bool barrel_switch) {
+    if (state->output_mode != HID_MODE_DIGITIZER) {
+        return;
+    }
+    uint8_t switches = 0;
+    if (tip_down) {
+        switches |= 0x01u;
+    }
+    if (barrel_switch) {
+        switches |= 0x02u;
+    }
+    if (in_range) {
+        switches |= 0x10u;
+    }
+    send_raw_digitizer_report(state, switches, x, y);
+}
+
 void hid_set_gamepad_hat(hid_state_t *state, uint8_t hat, uint16_t buttons) {
     if (state->prev_gamepad_hat == hat && state->prev_gamepad_buttons == buttons) {
         return;

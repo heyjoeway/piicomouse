@@ -31,6 +31,7 @@ typedef struct {
 #define POINTER_GAIN_X 3.0f
 #define POINTER_GAIN_Y 1.25f
 #define NO_IR_ENTER_THRESHOLD_FRAMES 5
+#define WIIMOTE_NORM_MAX 1000u
 #define WIIMOTE_BUTTON_MASK 0x1F9Fu
 #define WIIMOTE_HOME_MASK 0x0080u
 
@@ -38,6 +39,9 @@ static bool profile_pointer_prev_norm_valid;
 static uint16_t profile_pointer_prev_norm_x;
 static uint16_t profile_pointer_prev_norm_y;
 static uint8_t profile_pointer_no_ir_frames;
+static bool profile_pen_last_valid;
+static uint16_t profile_pen_last_x;
+static uint16_t profile_pen_last_y;
 static bool profile_home_tap_candidate;
 static bool profile_home_tap_prev_down;
 static bool profile_home_tap_press_pending;
@@ -84,6 +88,9 @@ static void reset_profile_runtime_state(void) {
     profile_pointer_prev_norm_x = 0;
     profile_pointer_prev_norm_y = 0;
     profile_pointer_no_ir_frames = 0;
+    profile_pen_last_valid = false;
+    profile_pen_last_x = 0;
+    profile_pen_last_y = 0;
     profile_home_tap_candidate = false;
     profile_home_tap_prev_down = false;
     profile_home_tap_press_pending = false;
@@ -194,6 +201,8 @@ static void profile_wiimote_default(wiimote_tracking_state_t *wiimote) {
         profile_pointer_no_ir_frames = 0;
         return;
     }
+    
+    hid_set_output_mode(&hid_state, HID_MODE_POINTER);
 
     uint16_t changed = wiimote->buttons ^ wiimote->previous_buttons_hid_mode;
     bool b_down = (wiimote->buttons & 0x0004u) != 0;
@@ -288,6 +297,36 @@ static void profile_wiimote_default(wiimote_tracking_state_t *wiimote) {
 static void profile_wiimote_test2(wiimote_tracking_state_t *wiimote) {
     if (handle_profile_selection_hotkeys(wiimote)) {
         return;
+    }
+
+    if (!hid_is_connected(&hid_state)) {
+        return;
+    }
+
+    hid_set_output_mode(&hid_state, HID_MODE_DIGITIZER);
+
+    if (wiimote->have_norm) {
+        uint16_t mapped_x = (uint16_t)(WIIMOTE_NORM_MAX - wiimote->norm_x);
+        bool tip_down = (wiimote->buttons & 0x0008u) != 0;
+        bool barrel_switch = (wiimote->buttons & 0x0004u) != 0;
+
+        profile_pen_last_valid = true;
+        profile_pen_last_x = mapped_x;
+        profile_pen_last_y = wiimote->norm_y;
+        hid_send_digitizer_position(&hid_state,
+                                    mapped_x,
+                                    wiimote->norm_y,
+                                    true,
+                                    tip_down,
+                                    barrel_switch);
+    } else if (profile_pen_last_valid) {
+        hid_send_digitizer_position(&hid_state,
+                                    profile_pen_last_x,
+                                    profile_pen_last_y,
+                                    false,
+                                    false,
+                                    false);
+        profile_pen_last_valid = false;
     }
 }
 
