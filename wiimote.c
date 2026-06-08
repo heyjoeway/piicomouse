@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 #include "pico/cyw43_arch.h"
 #include "pico/stdlib.h"
@@ -737,7 +738,14 @@ static void wiimote_ir_init_timer_handler_state(wiimote_tracking_state_t *state)
         state->ir_init_step == WIIMOTE_IR_INIT_REPORT_MODE_SELECT ? 120 : 40);
 }
 
-static void compute_ir_norm(wiimote_tracking_state_t *state, uint16_t cx, uint16_t cy, uint16_t spread_x, uint16_t spread_y) {
+static void compute_ir_norm(
+    wiimote_tracking_state_t *state,
+    uint16_t cx,
+    uint16_t cy,
+    uint16_t spread_x,
+    uint16_t spread_y,
+    float angle
+) {
     int32_t usable_x = 1023 - (int32_t)spread_x;
     if (usable_x > 0) {
         int32_t nx = ((int32_t)cx - (int32_t)(spread_x / 2u)) * 1000 / usable_x;
@@ -757,6 +765,31 @@ static void compute_ir_norm(wiimote_tracking_state_t *state, uint16_t cx, uint16
     } else {
         state->norm_y = 500u;
     }
+    
+    // Rotate norm by -angle around center (500, 500)
+    float cos_a = cosf(-angle);
+    float sin_a = sinf(-angle);
+    int32_t rotated_x = (int32_t)state->norm_x - 500;
+    int32_t rotated_y = (int32_t)state->norm_y - 500;
+    int32_t final_x = (int32_t)(rotated_x * cos_a - rotated_y * sin_a) + 500;
+    int32_t final_y = (int32_t)(rotated_x * sin_a + rotated_y * cos_a) + 500;
+    if (final_x < 0) final_x = 0;
+    if (final_x > 1000) final_x = 1000;
+    if (final_y < 0) final_y = 0;
+    if (final_y > 1000) final_y = 1000;
+    state->norm_x = (uint16_t)final_x;
+    state->norm_y = (uint16_t)final_y;
+}
+
+static float compute_angle(
+    uint16_t xl,
+    uint16_t yl,
+    uint16_t xr,
+    uint16_t yr
+) {
+    int32_t dx = (int32_t)xr - (int32_t)xl;
+    int32_t dy = (int32_t)yr - (int32_t)yl;
+    return atan2f((float)dy, (float)dx);
 }
 
 static void parse_wiimote_ir_extended(wiimote_tracking_state_t *state, const uint8_t *ir_data, uint16_t ir_len) {
@@ -803,6 +836,8 @@ static void parse_wiimote_ir_extended(wiimote_tracking_state_t *state, const uin
 
         state->center_x = (uint16_t)((xl + xr) / 2u);
         state->center_y = (uint16_t)((yl + yr) / 2u);
+        state->center_angle = compute_angle(xl, yl, xr, yr);
+        printf("IR: angle=%.2f\n", state->center_angle);
         state->have_center = true;
 
         state->ir_last_half_dx = (int16_t)((xr - xl) / 2u);
@@ -814,7 +849,14 @@ static void parse_wiimote_ir_extended(wiimote_tracking_state_t *state, const uin
 
         uint16_t spread_x = (uint16_t)(xr - xl);
         uint16_t spread_y = (yr >= yl) ? (uint16_t)(yr - yl) : (uint16_t)(yl - yr);
-        compute_ir_norm(state, state->center_x, state->center_y, spread_x, spread_y);
+        compute_ir_norm(
+            state,
+            state->center_x,
+            state->center_y,
+            spread_x,
+            spread_y,
+            state->center_angle
+    );
         state->have_norm = true;
 
     } else if (valid_count == 1 && state->ir_have_spread && state->ir_dropout_frames < 3) {
@@ -825,9 +867,21 @@ static void parse_wiimote_ir_extended(wiimote_tracking_state_t *state, const uin
         if (sx <= state->ir_last_center_x) {
             est_cx = (int32_t)sx + state->ir_last_half_dx;
             est_cy = (int32_t)sy + state->ir_last_half_dy;
+            state->center_angle = compute_angle(
+                sx,
+                sy,
+                state->ir_last_center_x + state->ir_last_half_dx,
+                state->ir_last_center_y + state->ir_last_half_dy
+            );
         } else {
             est_cx = (int32_t)sx - state->ir_last_half_dx;
             est_cy = (int32_t)sy - state->ir_last_half_dy;
+            state->center_angle = compute_angle(
+                state->ir_last_center_x - state->ir_last_half_dx,
+                state->ir_last_center_y - state->ir_last_half_dy,
+                sx,
+                sy
+            );
         }
 
         if (est_cx < 0) est_cx = 0;
@@ -844,7 +898,14 @@ static void parse_wiimote_ir_extended(wiimote_tracking_state_t *state, const uin
         uint16_t spread_y = (state->ir_last_half_dy >= 0)
             ? (uint16_t)(2 * state->ir_last_half_dy)
             : (uint16_t)(-2 * state->ir_last_half_dy);
-        compute_ir_norm(state, state->center_x, state->center_y, spread_x, spread_y);
+        compute_ir_norm(
+            state,
+            state->center_x,
+            state->center_y,
+            spread_x,
+            spread_y,
+            state->center_angle
+        );
         state->have_norm = true;
 
     } else {

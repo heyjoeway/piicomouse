@@ -23,6 +23,7 @@ typedef struct {
     bool have_center;
     uint16_t center_x;
     uint16_t center_y;
+    float center_angle;
     bool have_norm;
     uint16_t norm_x;
     uint16_t norm_y;
