@@ -8,6 +8,8 @@
 
 Turns a Wii Remote into a airmouse-style remote using a Pi Pico W 2. HEAVILY WIP. Currently intended for Android TV.
 
+This is a great way for developers to test the [upcoming support for pointing devices in Android TV](https://android-developers.googleblog.com/2026/05/increase-google-tv-app-discovery.html#:~:text=Declare%20support%20for%20pointing%20modality).
+
 ## Attribution and Credits
 
 - Wii homebrew, emulation, and hardware-hacking communities: public documentation, protocol notes, and reverse-engineering efforts that informed practical understanding of Wii Remote behavior.
